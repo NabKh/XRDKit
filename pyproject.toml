@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrdkit"
+version = "0.1.0"
+description = "Interactive multi-source XRD reference patterns: ICDD cards, CIF / POSCAR, Crystallography Open Database, Materials Project, and measured / computed diffractogram overlays."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Nabil Khossossi" }]
+requires-python = ">=3.10"
+keywords = [
+  "xrd", "x-ray-diffraction", "crystallography", "powder-diffraction",
+  "icdd", "jcpds", "pemwe", "materials-project", "cod", "streamlit",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Chemistry",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "pandas>=1.5",
+  "pymatgen>=2024.0",
+  "mp-api>=0.40",
+  "requests>=2.28",
+  "Pillow>=10.0",
+  "streamlit>=1.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+xrdkit = "xrdkit.cli:main"
+
+[project.urls]
+"Source"  = "https://github.com/NabKh/XRDKit"
+"Issues"  = "https://github.com/NabKh/XRDKit/issues"
+
+[tool.setuptools.packages.find]
+include = ["xrdkit*"]
+exclude = ["tests*", "docs*"]

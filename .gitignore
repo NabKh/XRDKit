@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+.eggs/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Generated artifacts (xrdkit-specific)
+xrdkit_pattern.pdf
+xrdkit_pattern.gif
+xrdkit_stacked.pdf
+xrdkit_overlay.pdf
+xrdkit.gif
+xrdkit_peaks.csv
+
+# Cached CIFs from COD
+.cache/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / editor / local agent config
+.vscode/
+.idea/
+.claude/
+*.swp
+.DS_Store
+
+# Secrets — never commit API keys
+.env
+.env.local
+mp_api_key.txt
+
+# Local scratch / superseded experiments — kept on disk, not published
+app.py.backup
+app.py.working
+xrdkit/plot.py.backup
+exact_diff_plot.py
+improved_diff_plot.py
+proper_r_factors.py
+_preview_difference.py
+preview_diff_pt.pdf
+preview_diff_pt.png
+preview_diff_tio2.pdf
+preview_diff_tio2.png

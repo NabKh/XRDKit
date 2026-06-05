@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+title: "xrdkit — interactive multi-source XRD reference patterns"
+message: "If you use xrdkit in published work, please cite this repository."
+authors:
+  - family-names: "Khossossi"
+    given-names: "Nabil"
+type: software
+version: 0.1.0
+date-released: "2026-05-12"
+license: MIT
+url: "https://github.com/NabKh/XRDKit"
+keywords:
+  - "X-ray diffraction"
+  - "powder diffraction"
+  - "crystallography"
+  - "ICDD"
+  - "Crystallography Open Database"
+  - "Materials Project"
