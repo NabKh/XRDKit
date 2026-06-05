@@ -56,7 +56,7 @@ def _unique(name, taken):
 # ============ SIDEBAR ============
    with st.sidebar:
       st.header("Reference cards")
-      st.caption("ICDD/JCPDS phases — tick to add.")
+      st.caption("Built-in ICDD/JCPDS phases. Tick to add.")
       cols = st.columns(2)
     cols = st.columns(2)
     if cols[0].button("Show all", use_container_width=True):
