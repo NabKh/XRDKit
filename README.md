@@ -14,18 +14,16 @@ Interactive XRD reference patterns from five sources, mixed in a single figure:
 
 A browser GUI (Streamlit) for interactive use, a command-line entry point for batch rendering, and a small Python API. Vector PDF and animated GIF export.
 
-## Try it in the browser — no install
+## Try it in the browser,
 
-xrdkit deploys as a hosted web app so collaborators (e.g. experimentalists) can
-use it from a link, with nothing to install. Host it free on Streamlit Community
-Cloud and add the one-click badge:
+*👉 Live app: https://xrdkit.streamlit.app**
 
-```markdown
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://YOUR-APP.streamlit.app)
-```
+  [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://xrdkit.streamlit.app)
 
-Step-by-step deployment (Streamlit Cloud / Hugging Face Spaces / self-hosted) is
-in [`DEPLOY.md`](DEPLOY.md).
+  Open the link and use XRDKit directly in your browser; nothing to install. Tick
+  reference phases, upload a measured pattern, and export publication-quality
+  figures. Deployment notes (Streamlit Cloud / Hugging Face / self-hosted) are in
+  [`DEPLOY.md`](DEPLOY.md).
 
 ## Install
 
