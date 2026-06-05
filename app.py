@@ -273,8 +273,9 @@ with tab_mp:
 # --- Measured upload ---
 with tab_meas:
     st.write("Drop your measured or computed XRD pattern. "
-             "Two-column ASCII (`.xy`, `.csv`, `.txt`, `.dat`, `.tsv`) or "
-             "PANalytical `.xrdml`. Use offset / scale / header-skip if needed.")
+             "Two-column ASCII (`.xy`, `.csv`, `.txt`, `.dat`, `.tsv` — "
+             "instrument header lines are skipped automatically), PANalytical "
+             "`.xrdml`, or Bruker `.brml`. Use offset / scale if needed.")
     cols = st.columns(4)
     meas_offset = cols[0].number_input("2θ offset (°)", value=0.0, step=0.01,
                                         format="%.3f", key="meas_offset")

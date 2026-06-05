@@ -1,6 +1,7 @@
 """Plotting and measured-data loading."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -24,52 +25,146 @@ class Measured:
     info: dict = field(default_factory=dict)
 
 
+_NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+
+def _read_xrdml(p):
+    """PANalytical .xrdml → (two_theta, intensity)."""
+    import xml.etree.ElementTree as ET
+    root = ET.parse(p).getroot()
+    start = end = step = None
+    intensities = None
+    for el in root.iter():
+        tag = el.tag.split("}")[-1]
+        if tag == "startPosition" and start is None:
+            start = float(el.text)
+        elif tag == "endPosition" and end is None:
+            end = float(el.text)
+        elif tag == "stepSize" and step is None:
+            step = float(el.text)
+        elif tag in ("intensities", "counts") and intensities is None:
+            intensities = np.fromstring(el.text, sep=" ")
+    if intensities is None or start is None or end is None:
+        raise ValueError(f"could not parse .xrdml: {p}")
+    if step is None:
+        step = (end - start) / max(len(intensities) - 1, 1)
+    return start + step * np.arange(len(intensities)), intensities
+
+
+def _read_brml(p):
+    """Bruker .brml (a ZIP of XML) → (two_theta, intensity).
+
+    Best-effort: pulls intensities from <Datum> rows and reconstructs 2θ from
+    the TwoTheta scan-axis Start/Increment when present, else from a 2θ column.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    with zipfile.ZipFile(p) as z:
+        names = z.namelist()
+        cand = [n for n in names
+                if n.split("/")[-1].lower().startswith("rawdata")
+                and n.lower().endswith(".xml")]
+        if not cand:
+            cand = [n for n in names if n.lower().endswith(".xml")]
+        if not cand:
+            raise ValueError(f"no XML data found inside .brml: {p}")
+        root = ET.fromstring(z.read(sorted(cand)[0]))
+
+    def _local(el):
+        return el.tag.split("}")[-1]
+
+    def _val(el):
+        txt = (el.text or "").strip() or el.get("Value") or ""
+        try:
+            return float(txt)
+        except (TypeError, ValueError):
+            return None
+
+    start = incr = None
+    for el in root.iter():
+        if _local(el) == "ScanAxisInfo":
+            axis = (el.get("AxisName") or "").lower()
+            if "theta" not in axis:
+                continue
+            for ch in el:
+                ln = _local(ch)
+                if ln == "Start":
+                    start = _val(ch)
+                elif ln == "Increment":
+                    incr = _val(ch)
+
+    rows = []
+    for el in root.iter():
+        if _local(el) == "Datum" and el.text:
+            nums = [float(x) for x in el.text.split(",")
+                    if _NUM_RE.fullmatch(x.strip() or "x")]
+            if nums:
+                rows.append(nums)
+    if not rows:
+        raise ValueError(f"no <Datum> intensities found in .brml: {p}")
+
+    intensity = np.array([r[-1] for r in rows], dtype=float)
+    if start is not None and incr is not None:
+        two_theta = start + incr * np.arange(len(intensity))
+    elif len(rows[0]) >= 2:
+        # fall back to the widest-spanning column as 2θ
+        cols = np.array([r for r in rows if len(r) == len(rows[0])], dtype=float)
+        spans = cols.max(axis=0) - cols.min(axis=0)
+        two_theta = cols[:, int(np.argmax(spans[:-1]))]
+        intensity = cols[:, -1]
+    else:
+        raise ValueError(f"could not reconstruct 2θ axis from .brml: {p}")
+    return two_theta, intensity
+
+
+def _read_ascii(p, delimiter=None, skiprows: int = 0):
+    """Robust 2-column ASCII reader.
+
+    Tolerates arbitrary metadata header lines (e.g. Bruker `'Id: ...` banners),
+    blank lines, comment markers, and any of space/tab/comma/semicolon
+    delimiters — every line that does not start with two parseable numbers is
+    skipped automatically, so `skiprows` is rarely needed.
+    """
+    xs, ys = [], []
+    with open(p, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    for line in lines[skiprows:]:
+        s = line.strip()
+        if not s or s[0] in "#!%;'\"*/":
+            continue
+        nums = _NUM_RE.findall(s.replace(",", " "))
+        if len(nums) < 2:
+            continue
+        try:
+            x, y = float(nums[0]), float(nums[1])
+        except ValueError:
+            continue
+        xs.append(x)
+        ys.append(y)
+    if len(xs) < 2:
+        raise ValueError(f"{p}: found no 2-column numeric data (2θ, intensity)")
+    return np.array(xs), np.array(ys)
+
+
 def load_measured(path, name=None, color="#000000", delimiter=None,
                   skiprows: int = 0, scale: float = 1.0,
                   two_theta_offset: float = 0.0) -> Measured:
-    """Read a 2-column ASCII XRD file (.xy/.csv/.txt/.dat/.tsv/.xrdml)."""
+    """Read a measured XRD pattern.
+
+    Supports two-column ASCII (.xy/.csv/.txt/.dat/.tsv with any delimiter and
+    arbitrary header lines), PANalytical .xrdml, and Bruker .brml.
+    """
     p = Path(path)
-    if p.suffix.lower() == ".xrdml":
-        import xml.etree.ElementTree as ET
-        root = ET.parse(p).getroot()
-        start = end = step = None
-        intensities = None
-        for el in root.iter():
-            tag = el.tag.split("}")[-1]
-            if tag == "startPosition" and start is None:
-                start = float(el.text)
-            elif tag == "endPosition" and end is None:
-                end = float(el.text)
-            elif tag == "stepSize" and step is None:
-                step = float(el.text)
-            elif tag in ("intensities", "counts") and intensities is None:
-                intensities = np.fromstring(el.text, sep=" ")
-        if intensities is None or start is None or end is None:
-            raise ValueError(f"could not parse .xrdml: {p}")
-        if step is None:
-            step = (end - start) / max(len(intensities) - 1, 1)
-        two_theta = start + step * np.arange(len(intensities))
-        y = intensities
+    suffix = p.suffix.lower()
+    if suffix == ".xrdml":
+        two_theta, y = _read_xrdml(p)
+    elif suffix == ".brml":
+        two_theta, y = _read_brml(p)
     else:
-        delim = delimiter
-        if delim is None:
-            for cand in (",", "\t", ";", None):
-                try:
-                    arr = np.loadtxt(p, delimiter=cand, comments=("#", "!"),
-                                     skiprows=skiprows, ndmin=2)
-                    if arr.shape[1] >= 2:
-                        delim = cand
-                        break
-                except Exception:
-                    continue
-        arr = np.loadtxt(p, delimiter=delim, comments=("#", "!"),
-                         skiprows=skiprows, ndmin=2)
-        if arr.shape[1] < 2:
-            raise ValueError(f"{p}: need at least 2 columns (2θ, intensity)")
-        two_theta = arr[:, 0].astype(float)
-        y = arr[:, 1].astype(float)
-    two_theta = two_theta + two_theta_offset
-    y = y * scale
+        two_theta, y = _read_ascii(p, delimiter=delimiter, skiprows=skiprows)
+    two_theta = two_theta.astype(float) + two_theta_offset
+    y = y.astype(float) * scale
     return Measured(name=name or p.stem, two_theta=two_theta, intensity=y,
                     color=color, source=f"file: {p.name}",
                     info={"path": str(p), "n_points": len(two_theta),
