@@ -16,12 +16,12 @@ A browser GUI (Streamlit) for interactive use, a command-line entry point for ba
 
 ## Try it in the browser,
 
-*👉 Live app: https://xrdkit.streamlit.app**
+*👉 Live app: https://xrdkit.streamlit.app*
 
   [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://xrdkit.streamlit.app)
 
   Open the link and use XRDKit directly in your browser; nothing to install. Tick
-  reference phases, upload a measured pattern, and export publication-quality
+  reference phases, upload a measured pattern, and export high-quality
   figures. Deployment notes (Streamlit Cloud / Hugging Face / self-hosted) are in
   [`DEPLOY.md`](DEPLOY.md).
 
