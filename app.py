@@ -162,6 +162,12 @@ with tab_struct:
                 continue
             try:
                 suffix = Path(f.name).suffix or ".cif"
+                if suffix.lower() in (".xy", ".xye", ".brml", ".xrdml",
+                                      ".dat", ".tsv", ".csv", ".txt", ".ras"):
+                    raise ValueError(
+                        f"`{suffix}` looks like a measured/computed diffractogram, "
+                        "not a crystal structure. Upload it in the "
+                        "**Upload measurement** tab instead.")
                 with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                     tmp.write(f.getvalue()); tmp_path = tmp.name
                 color = assign_color(USED); USED.append(color)

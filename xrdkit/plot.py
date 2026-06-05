@@ -150,19 +150,36 @@ def _read_ascii(p, delimiter=None, skiprows: int = 0):
 def load_measured(path, name=None, color="#000000", delimiter=None,
                   skiprows: int = 0, scale: float = 1.0,
                   two_theta_offset: float = 0.0) -> Measured:
-    """Read a measured XRD pattern.
+    """Read a measured XRD pattern from (almost) any lab's export.
 
-    Supports two-column ASCII (.xy/.csv/.txt/.dat/.tsv with any delimiter and
-    arbitrary header lines), PANalytical .xrdml, and Bruker .brml.
+    The format is detected from the file's *content*, not its extension, so a
+    mislabelled or unfamiliar file still loads:
+
+    * ZIP container (Bruker ``.brml``)        → :func:`_read_brml`
+    * XML (PANalytical ``.xrdml``, others)    → :func:`_read_xrdml`
+    * anything else                           → universal 2-column ASCII reader
+      that extracts the first two numbers of every line and ignores arbitrary
+      instrument headers, comments, and delimiters.
     """
     p = Path(path)
-    suffix = p.suffix.lower()
-    if suffix == ".xrdml":
-        two_theta, y = _read_xrdml(p)
-    elif suffix == ".brml":
+    with open(p, "rb") as fh:
+        head = fh.read(8)
+
+    if head[:4] == b"PK\x03\x04":                       # ZIP → Bruker .brml
         two_theta, y = _read_brml(p)
-    else:
-        two_theta, y = _read_ascii(p, delimiter=delimiter, skiprows=skiprows)
+    elif head.lstrip()[:1] in (b"<",):                   # XML (xrdml etc.)
+        try:
+            two_theta, y = _read_xrdml(p)
+        except Exception:
+            two_theta, y = _read_brml(p)                 # some XML brml variants
+    else:                                                # any ASCII table
+        try:
+            two_theta, y = _read_ascii(p, delimiter=delimiter, skiprows=skiprows)
+        except ValueError:
+            if p.suffix.lower() == ".xrdml":
+                two_theta, y = _read_xrdml(p)
+            else:
+                raise
     two_theta = two_theta.astype(float) + two_theta_offset
     y = y.astype(float) * scale
     return Measured(name=name or p.stem, two_theta=two_theta, intensity=y,
