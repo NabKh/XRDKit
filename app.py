@@ -54,13 +54,10 @@ def _unique(name, taken):
 
 
 # ============ SIDEBAR ============
-with st.sidebar:
-    st.header("Quick-pick reference cards")
-      st.caption(
-          "Electrocatalysis quick-picks. "
-          "Other crystalline materials load from the tabs above. "
-          "Nothing shown by default."
-      )
+   with st.sidebar:
+      st.header("Reference cards")
+      st.caption("ICDD/JCPDS phases — tick to add.")
+      cols = st.columns(2)
     cols = st.columns(2)
     if cols[0].button("Show all", use_container_width=True):
         for n in LIB: st.session_state[f"bi_{n}"] = True
