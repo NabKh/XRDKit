@@ -55,8 +55,9 @@ def _unique(name, taken):
 
 # ============ SIDEBAR ============
 with st.sidebar:
-    st.header("ICDD reference cards")
-    st.caption("built-in PEMWE / OER phases — tick to add. Nothing shown by default.")
+    st.header("Quick-pick reference cards")
+    st.caption("Electrocatalysis presets, tick to add. Any crystalline material loads from the CIF / COD / Materials Project tabs. 
+  Nothing shown by default")
     cols = st.columns(2)
     if cols[0].button("Show all", use_container_width=True):
         for n in LIB: st.session_state[f"bi_{n}"] = True
