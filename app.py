@@ -55,8 +55,8 @@ def _unique(name, taken):
 
 # ============ SIDEBAR ============
 with st.sidebar:
-    st.header("ICDD reference cards")
-    st.caption("built-in PEMWE / OER phases — tick to add. Nothing shown by default.")
+    st.header("Reference cards")
+    st.caption("Built-in ICDD/JCPDS phases. Tick to add.")
     cols = st.columns(2)
     if cols[0].button("Show all", use_container_width=True):
         for n in LIB: st.session_state[f"bi_{n}"] = True
@@ -133,10 +133,10 @@ with st.sidebar:
 _logo = HERE / "logo" / "logo_xrdkit_white.jpeg"
 if _logo.exists():
     st.image(str(_logo), width=320)
-st.title("XRD reference pattern composer")
-st.caption("Compose figures from ICDD cards · CIF / POSCAR files · the "
-           "Crystallography Open Database · the Materials Project, and overlay "
-           "your own measured or computed diffractograms.")
+st.title("XRDKit — powder-XRD pattern composer")
+st.caption("Build XRD reference patterns for any crystalline material from ICDD "
+           "cards, CIF/POSCAR files, the COD, or the Materials Project. Overlay "
+           "measured data and compute the observed-simulated difference.")
 
 tab_struct, tab_cod, tab_mp, tab_meas = st.tabs([
     "Upload structure (CIF / POSCAR)",
