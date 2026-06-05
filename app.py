@@ -1,4 +1,4 @@
-  """Streamlit GUI for xrdkit."""
+"""Streamlit GUI for xrdkit."""
   from __future__ import annotations
 
   import io
