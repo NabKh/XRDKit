@@ -133,7 +133,7 @@ with st.sidebar:
 _logo = HERE / "logo" / "logo_xrdkit_white.jpeg"
 if _logo.exists():
     st.image(str(_logo), width=320)
-st.title("XRDKit — powder-XRD pattern composer")
+st.title("XRDKit - powder-XRD pattern composer")
 st.caption("Build XRD reference patterns for any crystalline material from ICDD "
            "cards, CIF/POSCAR files, the COD, or the Materials Project. Overlay "
            "measured data and compute the observed-simulated difference.")
