@@ -204,7 +204,7 @@ xrdkit is a **figure composer**, not a refinement package.
 
 ## Author
 
-**Nabil Khossossi**, PhD
+**Nabil Khossossi**,
 Researcher | AI-Driven Materials Discovery | Computational Chemistry
 
 ## License
