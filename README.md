@@ -35,6 +35,8 @@ cd XRDKit
 pip install -e .            # installs xrdkit + dependencies
 ```
 
+The distribution is named `pyxrdkit`, because the name `xrdkit` on PyPI belongs to an unrelated project. The import name and the command are still `xrdkit`.
+
 Or without editable install:
 
 ```bash
