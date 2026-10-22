@@ -18,7 +18,8 @@ import matplotlib.pyplot as plt
 from xrdkit.core import WAVELENGTHS, WAVELENGTHS_KA12, NATURE_RC
 from xrdkit.db import (Phase, builtin_phases, from_structure_file, from_mp_id,
                         from_cod_id, search_mp, search_cod, assign_color)
-from xrdkit.plot import (Measured, load_measured, make_figure, save_gif,
+from xrdkit.plot import (Measured, load_measured, load_measured_excel,
+                          make_figure, save_gif,
                           peaks_table, compute_difference, make_difference_plot)
 
 
@@ -281,7 +282,8 @@ with tab_meas:
     st.write("Drop your measured or computed XRD pattern. "
              "Two-column ASCII (`.xy`, `.csv`, `.txt`, `.dat`, `.tsv` — "
              "instrument header lines are skipped automatically), PANalytical "
-             "`.xrdml`, or Bruker `.brml`. Use offset / scale if needed.")
+             "`.xrdml`, Bruker `.brml`, or Excel `.xlsx` (one pattern per sheet: "
+             "2θ in column A, intensity in column B). Use offset / scale if needed.")
     cols = st.columns(4)
     meas_offset = cols[0].number_input("2θ offset (°)", value=0.0, step=0.01,
                                         format="%.3f", key="meas_offset")
@@ -303,19 +305,27 @@ with tab_meas:
                 suffix = Path(f.name).suffix or ".xy"
                 with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                     tmp.write(f.getvalue()); tmp_path = tmp.name
-                m = load_measured(tmp_path, name=Path(f.name).stem,
-                                  color=meas_color, skiprows=int(meas_skip),
-                                  scale=float(meas_scale),
-                                  two_theta_offset=float(meas_offset))
-                m_name = _unique(m.name, set(MEASURED))
-                if m_name != m.name:
-                    m = Measured(name=m_name, two_theta=m.two_theta,
-                                 intensity=m.intensity, color=m.color,
-                                 source=m.source, info=m.info)
-                MEASURED[m_name] = m
+                if suffix.lower() in (".xlsx", ".xlsm"):
+                    loaded = load_measured_excel(
+                        tmp_path, color=meas_color, skiprows=int(meas_skip),
+                        scale=float(meas_scale),
+                        two_theta_offset=float(meas_offset))
+                else:
+                    loaded = [load_measured(tmp_path, name=Path(f.name).stem,
+                                            color=meas_color,
+                                            skiprows=int(meas_skip),
+                                            scale=float(meas_scale),
+                                            two_theta_offset=float(meas_offset))]
+                for m in loaded:
+                    m_name = _unique(m.name, set(MEASURED))
+                    if m_name != m.name:
+                        m = Measured(name=m_name, two_theta=m.two_theta,
+                                     intensity=m.intensity, color=m.color,
+                                     source=m.source, info=m.info)
+                    MEASURED[m_name] = m
+                    st.success(f"loaded **{m_name}**  ·  {m.info['n_points']} pts  ·  "
+                               f"2θ {m.info['tt_range'][0]:.1f}–{m.info['tt_range'][1]:.1f}°")
                 st.session_state.processed_upload_ids.add(fid)
-                st.success(f"loaded **{m_name}**  ·  {m.info['n_points']} pts  ·  "
-                           f"2θ {m.info['tt_range'][0]:.1f}–{m.info['tt_range'][1]:.1f}°")
             except Exception as e:
                 st.error(f"`{f.name}`: {type(e).__name__}: {e}")
 

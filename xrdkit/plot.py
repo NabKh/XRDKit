@@ -147,6 +147,50 @@ def _read_ascii(p, delimiter=None, skiprows: int = 0):
     return np.array(xs), np.array(ys)
 
 
+def _is_excel(p) -> bool:
+    """True for .xlsx/.xlsm workbooks (a ZIP holding ``xl/workbook.xml``)."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(p) as z:
+            return "xl/workbook.xml" in z.namelist()
+    except zipfile.BadZipFile:
+        return False
+
+
+def load_measured_excel(path, color="#000000", skiprows: int = 0,
+                        scale: float = 1.0,
+                        two_theta_offset: float = 0.0) -> List[Measured]:
+    """Read every sheet of an Excel workbook as one measured pattern.
+
+    Each sheet's first two columns are taken as (2θ, intensity); header rows,
+    text cells and blank rows are dropped. Sheets without at least two numeric
+    rows are skipped. The pattern is named after its sheet.
+    """
+    import pandas as pd
+
+    p = Path(path)
+    out = []
+    for sheet, df in pd.read_excel(p, sheet_name=None, header=None,
+                                   skiprows=skiprows).items():
+        if df.shape[1] < 2:
+            continue
+        xy = df.iloc[:, :2].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(xy) < 2:
+            continue
+        two_theta = xy.iloc[:, 0].to_numpy(float) + two_theta_offset
+        y = xy.iloc[:, 1].to_numpy(float) * scale
+        out.append(Measured(name=str(sheet), two_theta=two_theta, intensity=y,
+                            color=color, source=f"file: {p.name} [{sheet}]",
+                            info={"path": str(p), "sheet": str(sheet),
+                                  "n_points": len(two_theta),
+                                  "tt_range": (float(two_theta.min()),
+                                               float(two_theta.max()))}))
+    if not out:
+        raise ValueError(f"{p}: no sheet with 2-column numeric data (2θ, intensity)")
+    return out
+
+
 def load_measured(path, name=None, color="#000000", delimiter=None,
                   skiprows: int = 0, scale: float = 1.0,
                   two_theta_offset: float = 0.0) -> Measured:
@@ -155,6 +199,8 @@ def load_measured(path, name=None, color="#000000", delimiter=None,
     The format is detected from the file's *content*, not its extension, so a
     mislabelled or unfamiliar file still loads:
 
+    * Excel workbook (``.xlsx``)              → first sheet; use
+      :func:`load_measured_excel` for all sheets
     * ZIP container (Bruker ``.brml``)        → :func:`_read_brml`
     * XML (PANalytical ``.xrdml``, others)    → :func:`_read_xrdml`
     * anything else                           → universal 2-column ASCII reader
@@ -165,6 +211,12 @@ def load_measured(path, name=None, color="#000000", delimiter=None,
     with open(p, "rb") as fh:
         head = fh.read(8)
 
+    if head[:4] == b"PK\x03\x04" and _is_excel(p):     # Excel workbook
+        m = load_measured_excel(p, color=color, skiprows=skiprows, scale=scale,
+                                two_theta_offset=two_theta_offset)[0]
+        if name:
+            m.name = name
+        return m
     if head[:4] == b"PK\x03\x04":                       # ZIP → Bruker .brml
         two_theta, y = _read_brml(p)
     elif head.lstrip()[:1] in (b"<",):                   # XML (xrdml etc.)

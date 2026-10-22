@@ -11,7 +11,7 @@ from xrdkit.db import (
     from_mp_id, from_cod_id, search_mp, search_cod, assign_color,
 )
 from xrdkit.plot import (
-    Measured, load_measured, make_figure, save_pdf, save_gif, peaks_table,
+    Measured, load_measured, load_measured_excel, make_figure, save_pdf, save_gif, peaks_table,
     compute_difference, make_difference_plot, calculate_r_factors,
 )
 
@@ -22,7 +22,7 @@ __all__ = [
     "Phase", "builtin_phases",
     "from_cif", "from_structure_file", "from_mp_id", "from_cod_id",
     "search_mp", "search_cod", "assign_color",
-    "Measured", "load_measured",
+    "Measured", "load_measured", "load_measured_excel",
     "make_figure", "save_pdf", "save_gif", "peaks_table",
     "compute_difference", "make_difference_plot", "calculate_r_factors",
 ]
