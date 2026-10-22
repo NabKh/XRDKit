@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -20,7 +21,9 @@ from xrdkit.db import (Phase, builtin_phases, from_structure_file, from_mp_id,
                         from_cod_id, search_mp, search_cod, assign_color)
 from xrdkit.plot import (Measured, load_measured, load_measured_excel,
                           make_figure, save_gif,
-                          peaks_table, compute_difference, make_difference_plot)
+                          peaks_table, compute_difference, make_difference_plot,
+                          make_zoom_figure, DEFAULT_ZOOM_WINDOWS)
+from xrdkit import analysis as xa
 
 
 st.set_page_config(page_title="xrdkit",
@@ -121,6 +124,12 @@ with st.sidebar:
     bkg_slope = st.slider("Background slope", 0.0, 1.0, 0.0, step=0.05,
                           help="adds a linear baseline rising from 2θ_min to 2θ_max")
     layout_mode = st.radio("Layout", ["stacked", "overlay"], horizontal=True)
+    cols = st.columns(2)
+    y_scale = cols[0].selectbox("Intensity axis", ["linear", "sqrt", "log"],
+                                help="√I and log reveal weak and impurity peaks")
+    normalise = cols[1].selectbox(
+        "Normalise", ["max", "background"],
+        help="'background' subtracts a SNIP background before scaling to 1")
     cols = st.columns(2)
     show_profile = cols[0].checkbox("smooth profile", value=True)
     show_sticks = cols[1].checkbox("sticks (hkl)", value=True)
@@ -351,6 +360,7 @@ else:
         kalpha12=use_doublet, kalpha2_ratio=ka2_ratio,
         bkg_slope=bkg_slope,
         stack=(layout_mode == "stacked"),
+        y_scale=y_scale, normalise=normalise,
     )
 
     left, right = st.columns([3, 2])
@@ -496,6 +506,307 @@ else:
                 "Download difference figure (PDF)", dpdf.getvalue(),
                 file_name="xrdkit_difference.pdf", mime="application/pdf",
                 use_container_width=True)
+
+
+# ============ ANALYSIS OF MEASURED PATTERNS ============
+st.divider()
+st.header("Analysis of measured patterns")
+st.caption("Peak fitting, Kα2 stripping, Pawley cell refinement with space-group "
+           "model comparison, Williamson–Hall, zoom panels and phase search for "
+           "unassigned peaks. The wavelength is the one chosen in the sidebar "
+           "(Kα1/Kα2 when the doublet box is ticked).")
+
+if not measured:
+    st.info("Upload a measured pattern (tab above) to enable the analysis tools.")
+else:
+    if use_doublet:
+        an_wl = (float(wl_value[0]), float(wl_value[1]), float(ka2_ratio))
+    else:
+        an_wl = (float(wl_value), None, 0.5)
+    an_wl1 = an_wl[0]
+    st.session_state.setdefault("peak_tables", {})
+    st.session_state.setdefault("pawley", {})
+    an_names = [m.name for m in measured]
+    an_by = {m.name: m for m in measured}
+
+    (t_peaks, t_ka2, t_pawley, t_wh, t_zoom, t_match) = st.tabs([
+        "Peak table", "Kα2 stripping", "Cell refinement (Pawley)",
+        "Williamson–Hall", "Zoom panels", "Unassigned peaks → database"])
+
+    def _peaks(name, snr):
+        key = (name, snr, an_wl, tt_lo, tt_hi)
+        if key not in st.session_state.peak_tables:
+            st.session_state.peak_tables[key] = xa.find_peaks_table(
+                an_by[name], wavelength=an_wl, tt_range=(tt_lo, tt_hi),
+                min_snr=snr, kalpha2=an_wl[1] is not None)
+        return st.session_state.peak_tables[key]
+
+    with t_peaks:
+        c = st.columns([2, 1])
+        pk_name = c[0].selectbox("Pattern", an_names, key="pk_name")
+        pk_snr = c[1].number_input("min S/N", 2.0, 50.0, 5.0, step=1.0, key="pk_snr")
+        with st.spinner("fitting peaks…"):
+            pk = _peaks(pk_name, pk_snr)
+        st.caption(f"{len(pk)} peaks · noise σ = {pk.attrs.get('noise_sigma', float('nan')):.3g}"
+                   " · esd from the fit covariance (statistical only)."
+                   + (" Kα2 companions fitted at fixed ratio." if an_wl[1] else
+                      " Single wavelength: tick the Kα1/Kα2 box for Cu-tube data."))
+        st.dataframe(pk, hide_index=True, use_container_width=True)
+        st.download_button("Download peak table (CSV)", pk.to_csv(index=False).encode(),
+                           file_name=f"{pk_name}_peaks.csv", mime="text/csv")
+
+    with t_ka2:
+        if an_wl[1] is None:
+            st.info("Tick “Kα1 / Kα2 doublet” in the sidebar to select the Kα2 line.")
+        else:
+            ka_name = st.selectbox("Pattern", an_names, key="ka_name")
+            stripped = xa.strip_kalpha2(an_by[ka_name], an_wl[0], an_wl[1], an_wl[2])
+            kfig, kax = plt.subplots(figsize=(6.0, 2.6))
+            kax.plot(an_by[ka_name].two_theta, an_by[ka_name].intensity, lw=0.6,
+                     color="#999999", label="measured")
+            kax.plot(stripped.two_theta, stripped.intensity, lw=0.7,
+                     color="#0072B2", label="Kα1 only (Rachinger)")
+            kax.set_xlim(tt_lo, tt_hi); kax.set_xlabel("2θ (°)"); kax.set_ylabel("I (counts)")
+            kax.legend(frameon=False)
+            st.pyplot(kfig, use_container_width=True); plt.close(kfig)
+            st.caption("Rachinger assumes an exact Kα2/Kα1 ratio and identical line "
+                       "shapes; small negative ripples next to sharp peaks are "
+                       "the usual artefact. Fit the doublet (peak table / Pawley) "
+                       "for quantitative work.")
+            if st.button("Add stripped pattern to the plot", key="ka_add"):
+                nm = _unique(stripped.name, MEASURED)
+                stripped.name = nm
+                MEASURED[nm] = stripped
+                st.rerun()
+
+    with t_pawley:
+        st.markdown(
+            "Whole-pattern Pawley fit (free intensities, Caglioti widths, pseudo-Voigt, "
+            "Chebyshev background, sample displacement) for each candidate perovskite "
+            "space group. Models are ranked by BIC; ΔBIC > 10 is strong evidence "
+            "against a model. **Pawley fits see the metric (cell shape) only:** weak "
+            "octahedral-tilt superstructure lines are not resolved at lab-XRD S/N, so "
+            "groups with the same metric are indistinguishable, and a lower-symmetry "
+            "cell always fits at least as well. esds are statistical and optimistic.")
+        c = st.columns([2, 3, 1])
+        pw_names = c[0].multiselect("Patterns", an_names, default=an_names, key="pw_names")
+        pw_models = c[1].multiselect("Space-group models", list(xa.PEROVSKITE_MODELS),
+                                     default=["Pm-3m", "R-3c", "Pnma", "I4/mcm", "Imma"],
+                                     key="pw_models")
+        pw_zero = c[2].radio("Offset", ["displacement", "zero"], key="pw_zero",
+                             help="sample displacement (∝cosθ, Bragg–Brentano) or "
+                                  "constant zero shift; refining both is ill-conditioned")
+        with_struct = {n: p for n, p in {**LIB, **CUSTOM}.items()
+                       if p.info.get("structure") is not None}
+        c2 = st.columns([3, 1])
+        pw_extra = c2[0].multiselect(
+            "Additional phases (refined jointly: own cell ±3 %, own peak width)",
+            list(with_struct), key="pw_extra",
+            help="For multiphase samples (e.g. Ruddlesden–Popper, La₂O₃ impurities). "
+                 "Phases come from the reference library, uploaded CIFs or the "
+                 "database tab. Overlapping lines make intensity shares and the "
+                 "perovskite cell less certain than the esds suggest.")
+        pw_apc = c2[1].number_input("a_pc seed (Å, 0 = auto)", 0.0, 5.0, 0.0, 0.001,
+                                    format="%.3f", key="pw_apc",
+                                    help="auto: from the pseudocubic 200 line. Set it "
+                                         "when the perovskite is a minority phase.")
+        if st.button("Run refinement", key="pw_run", type="primary") and pw_names and pw_models:
+            prog = st.progress(0.0)
+            try:
+                extras = [xa.phase_spec(with_struct[n].info["structure"]) for n in pw_extra]
+            except Exception as e:
+                st.error(f"Could not build additional phase: {type(e).__name__}: {e}")
+                extras = []
+            for i, nm in enumerate(pw_names):
+                with st.spinner(f"{nm}: {len(pw_models)} models…"):
+                    res, df = xa.compare_models(
+                        an_by[nm], models=pw_models, wavelength=an_wl,
+                        tt_range=(tt_lo, tt_hi), a_pc=(pw_apc or None),
+                        extra_phases=extras,
+                        refine_disp=(pw_zero == "displacement"),
+                        refine_zero=(pw_zero == "zero"))
+                st.session_state.pawley[nm] = (res, df)
+                prog.progress((i + 1) / len(pw_names))
+        done = [n for n in pw_names if n in st.session_state.pawley]
+        if done:
+            summ = []
+            for nm in done:
+                res, df = st.session_state.pawley[nm]
+                if "BIC" not in df:
+                    continue
+                r0 = df.iloc[0].to_dict()
+                r0["ΔBIC to 2nd"] = float(df["ΔBIC"].iloc[1]) if len(df) > 1 else float("nan")
+                summ.append({"sample": nm, **r0})
+            if summ:
+                st.subheader("Best model per sample")
+                sdf = pd.DataFrame(summ)
+                keep = ["sample", "model", "a (Å)", "σa", "b (Å)", "σb", "c (Å)", "σc",
+                        "α (°)", "β (°)", "γ (°)", "V (Å³)", "σV", "Z", "V/Z (Å³)",
+                        "a_pc (Å)", "Rwp (%)", "GoF", "ΔBIC to 2nd"]
+                st.dataframe(sdf[[k for k in keep if k in sdf]], hide_index=True,
+                             use_container_width=True)
+                st.download_button("Download summary (CSV)", sdf.to_csv(index=False).encode(),
+                                   file_name="pawley_summary.csv", mime="text/csv")
+            sel = st.selectbox("Inspect sample", done, key="pw_inspect")
+            res, df = st.session_state.pawley[sel]
+            st.dataframe(df, hide_index=True, use_container_width=True)
+            ok = [r for r in res if not isinstance(r, Exception)]
+            if ok:
+                mdl = st.selectbox("Model", [r.model for r in ok], key="pw_model_plot",
+                                   index=[r.model for r in ok].index(df["model"].iloc[0])
+                                   if df["model"].iloc[0] in [r.model for r in ok] else 0)
+                rr = next(r for r in ok if r.model == mdl)
+                pfig = xa.make_pawley_plot(rr)
+                st.pyplot(pfig, use_container_width=True)
+                if rr.extra:
+                    st.markdown("**Additional phases**")
+                    st.dataframe(pd.DataFrame([
+                        {"phase": e["name"],
+                         **{k: round(v, 5) for k, v in zip("abc", e["cell"][:3])},
+                         "V (Å³)": e["volume"], "FWHM scale": e["fwhm_scale"],
+                         "intensity share": e["intensity_share"]} for e in rr.extra]),
+                        hide_index=True, use_container_width=True)
+                pbuf = io.BytesIO(); pfig.savefig(pbuf, format="pdf"); plt.close(pfig)
+                st.download_button("Download fit (PDF)", pbuf.getvalue(),
+                                   file_name=f"{sel}_{mdl.replace('/', '')}_pawley.pdf",
+                                   mime="application/pdf")
+                if rr.correlations:
+                    st.caption("Strong correlations (|r| > 0.8): " + ", ".join(
+                        f"{k} {v:+.2f}" for k, v in rr.correlations.items()))
+
+    with t_wh:
+        c = st.columns([2, 1, 1])
+        wh_name = c[0].selectbox("Pattern", an_names, key="wh_name")
+        wh_K = c[1].number_input("Shape factor K", 0.5, 1.5, 0.9, step=0.01, key="wh_K")
+        wh_corr = c[2].selectbox("Instrument correction",
+                                 ["auto", "lorentzian", "gaussian"], key="wh_corr")
+        inst_mode = st.radio("Instrumental broadening",
+                             ["none", "constant FWHM", "Caglioti U, V, W (from LaB6/Si)"],
+                             horizontal=True, key="wh_inst")
+        inst = None
+        if inst_mode == "constant FWHM":
+            inst = st.number_input("FWHM_inst (°)", 0.0, 1.0, 0.05, step=0.005,
+                                   format="%.3f", key="wh_c")
+        elif inst_mode.startswith("Caglioti"):
+            cc = st.columns(3)
+            inst = (cc[0].number_input("U", value=0.004, format="%.5f", key="wh_U"),
+                    cc[1].number_input("V", value=-0.002, format="%.5f", key="wh_V"),
+                    cc[2].number_input("W", value=0.002, format="%.5f", key="wh_W"))
+        pk = _peaks(wh_name, 5.0)
+        pk_sel = st.multiselect(
+            "Peaks to use (single, resolved reflections only)",
+            [f"{t:.3f}" for t in pk["two_theta"]],
+            default=[f"{t:.3f}" for t in pk["two_theta"]], key=f"wh_sel_{wh_name}")
+        mask = np.isin([f"{t:.3f}" for t in pk["two_theta"]], pk_sel)
+        if mask.sum() >= 3:
+            wh = xa.williamson_hall(pk, wavelength=an_wl1, K=wh_K, instrument=inst,
+                                    correction=wh_corr, select=mask)
+            wl, wr = st.columns([3, 2])
+            wfig = xa.make_wh_plot(wh)
+            wl.pyplot(wfig, use_container_width=True); plt.close(wfig)
+            wr.metric("D (nm)", f"{wh['D_nm']:.1f} ± {wh['D_nm_esd']:.1f}"
+                      if np.isfinite(wh["D_nm"]) else "—")
+            wr.metric("ε (%)", f"{100 * wh['strain']:.3f} ± {100 * wh['strain_esd']:.3f}"
+                      if np.isfinite(wh["strain"]) else "—")
+            wr.caption(f"R² = {wh['r2']:.3f} · {wh['correction']} correction. "
+                       + (wh.get("note") or ""))
+            if inst is None:
+                wr.warning("No instrumental correction: D is a lower bound and ε an "
+                           "upper bound.")
+        else:
+            st.info("Select at least three peaks.")
+
+    with t_zoom:
+        zs = st.multiselect("Patterns", an_names, default=an_names, key="zoom_names")
+        zw = st.text_input("Windows (2θ ranges, °)",
+                           "; ".join(f"{a:g}-{b:g}" for a, b in DEFAULT_ZOOM_WINDOWS),
+                           key="zoom_win",
+                           help="defaults bracket pseudocubic 110, 111, 200, 211, 220 for Cu Kα")
+        try:
+            wins = [tuple(float(v) for v in w.split("-")) for w in zw.split(";") if w.strip()]
+            zc = st.columns(2)
+            z_scale = zc[0].selectbox("Intensity axis", ["linear", "sqrt", "log"], key="zoom_y")
+            z_bkg = zc[1].checkbox("subtract background", True, key="zoom_bkg")
+            zfig = make_zoom_figure([an_by[n] for n in zs], windows=wins,
+                                       phases=phases or None, wavelength_A=an_wl1,
+                                       subtract_background=z_bkg, y_scale=z_scale)
+            st.pyplot(zfig, use_container_width=True)
+            zbuf = io.BytesIO(); zfig.savefig(zbuf, format="pdf"); plt.close(zfig)
+            st.download_button("Download zoom panels (PDF)", zbuf.getvalue(),
+                               file_name="xrdkit_zoom.pdf", mime="application/pdf")
+        except Exception as e:
+            st.error(f"Zoom figure failed: {type(e).__name__}: {e}")
+
+    with t_match:
+        st.markdown(
+            "Peaks not explained by the refined main phase (or by the ticked "
+            "reference phases) are matched against database structures made of "
+            "subsets of the elements you give. Score = fraction of unassigned "
+            "intensity explained × fraction of the candidate's strong lines present. "
+            "A high score is a hypothesis to check by overlay, not an identification.")
+        c = st.columns([2, 2, 1])
+        um_name = c[0].selectbox("Pattern", an_names, key="um_name")
+        um_els = c[1].text_input("Elements", "La, Sr, Mn, Ni, O", key="um_els")
+        um_tol = c[2].number_input("tol (°)", 0.05, 0.5, 0.15, step=0.01, key="um_tol")
+        c = st.columns(3)
+        um_src = c[0].selectbox("Database", ["auto", "cod", "mp"], key="um_src",
+                                help="auto: COD, falling back to Materials Project")
+        um_strain = c[1].number_input("lattice-scale scan ± (%)", 0.0, 5.0, 1.0,
+                                      step=0.5, key="um_strain") / 100
+        um_sub = c[2].number_input("max elements per phase", 1, 5, 3, key="um_sub")
+        refsets = [np.array([p[0] for p in ph.peaks(an_wl1, (tt_lo, tt_hi))])
+                   for ph in phases]
+        src = "ticked reference phases"
+        if um_name in st.session_state.pawley:
+            res, df = st.session_state.pawley[um_name]
+            best = next((r for r in res if not isinstance(r, Exception)
+                         and r.model == df["model"].iloc[0]), None)
+            if best is not None:
+                refsets.append(np.asarray(best.ticks, float))
+                src = f"Pawley {best.model} reflections" + (" + ticked phases" if phases else "")
+        pk = _peaks(um_name, 5.0)
+        un = xa.unassigned_peaks(pk, refsets, tol=um_tol) if refsets else pk
+        st.caption(f"Assigned against: {src if refsets else 'nothing (run Pawley or tick a phase)'}"
+                   f" · {len(un)} of {len(pk)} peaks unassigned")
+        st.dataframe(un[["two_theta", "d", "height", "fwhm", "snr"]], hide_index=True,
+                     use_container_width=True)
+        if st.button("Search database", key="um_run", disabled=len(un) == 0):
+            msg = st.empty()
+            with st.spinner("querying OPTIMADE and scoring candidates…"):
+                mdf = xa.match_cod(un, pk, [e for e in um_els.replace(" ", "").split(",")],
+                                   wavelength=an_wl1, tt_range=(tt_lo, tt_hi),
+                                   tol=um_tol, max_subset=int(um_sub),
+                                   max_strain=um_strain, source=um_src,
+                                   progress=lambda t: msg.caption(t))
+            st.session_state.match_df = mdf
+        if "match_df" in st.session_state:
+            mdf = st.session_state.match_df
+            st.caption(f"source: {mdf.attrs.get('source')}")
+            for e in mdf.attrs.get("errors", [])[:5]:
+                st.caption(f"⚠ {e}")
+            st.dataframe(mdf.head(30), hide_index=True, use_container_width=True)
+            if not mdf.empty:
+                pick = st.selectbox("Add candidate as reference", mdf["id"].head(30).tolist(),
+                                    key="um_pick")
+                if st.button("Add as reference phase", key="um_add"):
+                    try:
+                        if pick.startswith("COD "):
+                            ph = from_cod_id(pick.split()[1])
+                        else:
+                            from xrdkit.db import _structure_phase
+                            stc = mdf.attrs["structures"][pick]
+                            sg = stc.get_space_group_info(symprec=0.01)
+                            ph = _structure_phase(
+                                f"{stc.composition.reduced_formula} ({pick})", stc,
+                                "#444444", f"Materials Project {pick} (DFT cell)",
+                                {"formula": stc.composition.reduced_formula,
+                                 "spacegroup": sg[0], "spacegroup_number": sg[1]})
+                        ph.name = _unique(ph.name, {**LIB, **CUSTOM})
+                        ph.color = assign_color(USED); USED.append(ph.color)
+                        CUSTOM[ph.name] = ph
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not load {pick}: {type(e).__name__}: {e}")
 
 
 # ============ FOOTER ============

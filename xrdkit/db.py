@@ -103,6 +103,8 @@ def _structure_phase(name: str, structure, color: str, source: str, info: dict) 
             hkl = tuple(int(v) for v in hkls[0]["hkl"]) if hkls else (0, 0, 0)
             peaks.append((float(tt), float(I), hkl))
         return peaks
+    info = dict(info)
+    info.setdefault("structure", structure)
     return Phase(name=name, color=color, source=source, peaks_fn=fn, info=info)
 
 
@@ -189,25 +191,26 @@ def _cod_format_formula(f: str) -> str:
 
 
 def search_cod(formula, max_results=25):
-    """Query the Crystallography Open Database for structures matching a formula."""
-    import requests
-    r = requests.get(
-        "https://www.crystallography.net/cod/result",
-        params={"formula": _cod_format_formula(formula), "format": "json"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    data = r.json()
-    out = []
-    for entry in data[:max_results]:
-        out.append({
-            "cod_id": str(entry.get("file")),
-            "formula": entry.get("formula"),
-            "spacegroup": entry.get("sg"),
-            "title": (entry.get("commonname") or entry.get("chemname")
-                      or entry.get("mineral") or "")[:80],
-        })
-    return out
+    """Query the Crystallography Open Database for structures matching a formula.
+
+    Uses COD's OPTIMADE endpoint (the legacy ``/cod/result`` JSON search is no
+    longer served). OPTIMADE cannot filter on the formula itself, so entries
+    with exactly the formula's element set are fetched and those whose reduced
+    formula matches are listed first, followed by non-stoichiometric and
+    other compositions of the same elements.
+    """
+    from pymatgen.core import Composition
+    from xrdkit.analysis import cod_optimade_query
+    comp = Composition(_cod_format_formula(formula).replace(" ", ""))
+    target = comp.reduced_formula
+    els = sorted(el.symbol for el in comp.elements)
+    rows = cod_optimade_query(els, nelements=len(els))
+    rows = [r for r in rows if r["has_coordinates"]]
+    rows.sort(key=lambda r: (r["formula"] != target,
+                             r["R"] if r["R"] is not None else 1.0))
+    return [{"cod_id": r["cod_id"], "formula": r["formula"],
+             "spacegroup": r["spacegroup"], "title": r["title"]}
+            for r in rows[:max_results]]
 
 
 def from_cod_id(cod_id, color="#444444", name=None, cache_dir=None) -> Phase:

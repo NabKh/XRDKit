@@ -14,6 +14,11 @@ from xrdkit.plot import (
     Measured, load_measured, load_measured_excel, make_figure, save_pdf, save_gif, peaks_table,
     compute_difference, make_difference_plot, calculate_r_factors,
 )
+from xrdkit.analysis import (
+    PEROVSKITE_MODELS, PawleyResult, find_peaks_table, strip_kalpha2,
+    williamson_hall, pawley_refine, compare_models, phase_spec, estimate_a_pc,
+    unassigned_peaks, match_cod,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -25,4 +30,7 @@ __all__ = [
     "Measured", "load_measured", "load_measured_excel",
     "make_figure", "save_pdf", "save_gif", "peaks_table",
     "compute_difference", "make_difference_plot", "calculate_r_factors",
+    "PEROVSKITE_MODELS", "PawleyResult", "find_peaks_table", "strip_kalpha2",
+    "williamson_hall", "pawley_refine", "compare_models", "phase_spec",
+    "estimate_a_pc", "unassigned_peaks", "match_cod",
 ]

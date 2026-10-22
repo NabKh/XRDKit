@@ -292,11 +292,33 @@ def _prepare(phases, wavelengths, crystallite_nm, tt_range, eta):
     return grid, traces
 
 
-def _style_axes(ax, tt_range, ymax):
+Y_SCALES = ("linear", "sqrt", "log")
+Y_LABELS = {
+    "linear": "Normalised intensity (a.u.)",
+    "sqrt": r"$\sqrt{I}$ (normalised)",
+    "log": r"log$_{10}$ I (normalised, 3 decades)",
+}
+
+
+def _yscale(y, mode: str = "linear"):
+    """Map max-normalised intensity in [0, 1] onto [0, 1] for display.
+
+    "sqrt" is the conventional √I axis (Poisson noise becomes uniform);
+    "log" shows three decades, log10(1 + 999·y)/3, so weak superstructure or
+    impurity peaks are visible while stacked offsets stay comparable."""
+    y = np.clip(np.asarray(y, float), 0.0, None)
+    if mode == "sqrt":
+        return np.sqrt(y)
+    if mode == "log":
+        return np.log10(1.0 + 999.0 * y) / 3.0
+    return y
+
+
+def _style_axes(ax, tt_range, ymax, y_scale: str = "linear"):
     ax.set_xlim(*tt_range)
     ax.set_ylim(-0.05, ymax)
     ax.set_xlabel(r"2$\theta$ (degrees)")
-    ax.set_ylabel("Normalised intensity (a.u.)")
+    ax.set_ylabel(Y_LABELS.get(y_scale, Y_LABELS["linear"]))
     ax.xaxis.set_major_locator(MultipleLocator(10))
     ax.xaxis.set_minor_locator(MultipleLocator(2))
     ax.yaxis.set_major_locator(plt.NullLocator())
@@ -327,6 +349,8 @@ def make_figure(
     stack: bool = True,
     offset_step: float = 1.15,
     figsize=None,
+    y_scale: str = "linear",
+    normalise: str = "max",
 ):
     """Render the reference + measured figure.
 
@@ -346,6 +370,12 @@ def make_figure(
         Add the Kα2 satellite at ``kalpha2_ratio`` × Kα1 intensity.
     bkg_slope : float
         Add a linear baseline of slope * (2θ − tt_min)/(tt_max − tt_min).
+    y_scale : "linear", "sqrt" or "log"
+        Display transform applied after normalisation (see :func:`_yscale`).
+    normalise : "max" or "background"
+        Measured traces are divided by their maximum; with "background" the
+        SNIP background is subtracted first, so traces with very different
+        backgrounds (e.g. fluorescence) can be compared on peak height.
     """
     plt.rcParams.update(NATURE_RC)
     measured = list(measured or [])
@@ -376,6 +406,7 @@ def make_figure(
         offset = i * offset_step if stack else 0.0
         y_show = t["y"] + bkg
         y_show = y_show / max(y_show.max(), 1e-9) if y_show.max() > 0 else y_show
+        y_show = _yscale(y_show, y_scale)
 
         if show_profile:
             ax.fill_between(grid, offset, y_show + offset,
@@ -383,7 +414,7 @@ def make_figure(
             ax.plot(grid, y_show + offset, color=ph.color, linewidth=1.2)
         if show_sticks and t["peaks"]:
             for tt, I, _ in t["peaks"]:
-                h = I / t["max_I"]
+                h = float(_yscale(I / t["max_I"], y_scale))
                 ax.plot([tt, tt], [offset, offset + 0.95 * h],
                         color=ph.color, linewidth=0.6, alpha=0.55,
                         solid_capstyle="butt")
@@ -392,7 +423,7 @@ def make_figure(
                 rel = I / t["max_I"] * 100.0
                 if rel < hkl_threshold:
                     continue
-                ax.text(tt, offset + 0.95 * (I / t["max_I"]) + 0.06,
+                ax.text(tt, offset + 0.95 * float(_yscale(I / t["max_I"], y_scale)) + 0.06,
                         f"${_hkl_str(hkl)}$",
                         color=ph.color, ha="center", va="bottom",
                         fontsize=6, rotation=90)
@@ -405,15 +436,19 @@ def make_figure(
         mask = (m.two_theta >= tt_range[0]) & (m.two_theta <= tt_range[1])
         x = m.two_theta[mask]
         y = m.intensity[mask].astype(float)
+        if normalise == "background" and y.size > 10:
+            step = float(np.median(np.diff(x))) or 0.02
+            y = y - _snip_background(y, n_iter=int(min(400, max(4, 2.5 / step))))
         if y.size and y.max() > 0:
             y = y / y.max()
+        y = _yscale(y, y_scale)
         ax.plot(x, y + offset, color=m.color, linewidth=0.9, label=m.name)
         if stack:
             ax.text(tt_range[1] - 1.0, offset + 0.92, m.name, color=m.color,
                     ha="right", va="center", fontsize=8, fontstyle="italic")
 
     ymax = (n_total - 1) * offset_step + 1.30 if stack and n_total else 1.20
-    _style_axes(ax, tt_range, ymax)
+    _style_axes(ax, tt_range, ymax, y_scale)
     if not stack:
         for t in traces:
             ax.plot([], [], color=t["phase"].color, linewidth=1.2,
@@ -424,6 +459,79 @@ def make_figure(
                   labelspacing=0.4)
     fig.tight_layout()
     return fig, ax
+
+
+DEFAULT_ZOOM_WINDOWS = ((31.6, 33.4), (39.2, 41.0), (45.8, 47.4), (57.0, 59.2),
+                        (67.0, 69.2))
+
+
+def make_zoom_figure(measured: List[Measured], windows=DEFAULT_ZOOM_WINDOWS,
+                     phases: Optional[List[Phase]] = None, wavelength_A=1.54056,
+                     subtract_background: bool = True, y_scale: str = "linear",
+                     offset_step: float = 1.1, ticks=None, figsize=None):
+    """Stacked measured traces in narrow 2θ windows, one panel per window.
+
+    Each trace is normalised to its own maximum *inside each window* (after
+    SNIP background subtraction on the full pattern), so peak splitting and
+    shifts between samples can be compared even when absolute intensities
+    differ. Default windows bracket the pseudocubic 110, 111, 200, 211 and
+    220 reflections of an ABO3 perovskite with Cu Kα.
+
+    ``ticks`` is an optional list of (label, colour, 2θ array) drawn as rows
+    of reflection markers below the traces (e.g. Pawley reflection lists).
+    """
+    plt.rcParams.update(NATURE_RC)
+    measured = list(measured or [])
+    phases = list(phases or [])
+    ticks = list(ticks or [])
+    n = len(windows)
+    if figsize is None:
+        figsize = (1.55 * n + 0.6, 0.55 * max(len(measured), 1) + 1.9)
+    fig, axes = plt.subplots(1, n, figsize=figsize, squeeze=False)
+    axes = axes[0]
+    nets = []
+    for m in measured:
+        x = np.asarray(m.two_theta, float)
+        y = np.asarray(m.intensity, float)
+        if subtract_background and y.size > 10:
+            step = float(np.median(np.diff(x))) or 0.02
+            y = y - _snip_background(y, n_iter=int(min(400, max(4, 2.5 / step))))
+        nets.append((x, y))
+    wl = wavelength_A[0] if isinstance(wavelength_A, (tuple, list)) else wavelength_A
+    ref_rows = [(ph.name, ph.color,
+                 np.array([p[0] for p in ph.peaks(wl, (min(w[0] for w in windows),
+                                                       max(w[1] for w in windows)))]))
+                for ph in phases] + ticks
+    n_ref = len(ref_rows)
+    for ax, (lo, hi) in zip(axes, windows):
+        for j, (m, (x, y)) in enumerate(zip(measured, nets)):
+            k = (x >= lo) & (x <= hi)
+            yy = y[k]
+            if yy.size and yy.max() > 0:
+                yy = yy / yy.max()
+            off = (j + (0.35 * n_ref if n_ref else 0.0)) * offset_step
+            ax.plot(x[k], _yscale(yy, y_scale) + off, color=m.color, lw=0.9)
+        for r, (_, color, tt) in enumerate(ref_rows):
+            tt = np.asarray(tt, float)
+            tt = tt[(tt >= lo) & (tt <= hi)]
+            yb = -0.05 + 0.35 * r * offset_step
+            ax.vlines(tt, yb, yb + 0.25, color=color, lw=0.9)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(-0.1, (len(measured) - 1 + 0.35 * n_ref) * offset_step + 1.15)
+        ax.yaxis.set_major_locator(plt.NullLocator())
+        ax.xaxis.set_major_locator(MultipleLocator(0.5 if hi - lo <= 2.5 else 1.0))
+        ax.tick_params(axis="x", labelsize=6)
+    axes[0].set_ylabel(Y_LABELS.get(y_scale, Y_LABELS["linear"]))
+    fig.supxlabel(r"2$\theta$ (degrees)", fontsize=8)
+    handles = [plt.Line2D([], [], color=m.color, lw=1.0) for m in measured]
+    handles += [plt.Line2D([], [], color=c, lw=1.0, marker="|", ls="none", ms=8)
+                for _, c, _ in ref_rows]
+    labels = [m.name for m in measured] + [lbl for lbl, _, _ in ref_rows]
+    if handles:
+        fig.legend(handles, labels, loc="upper center", ncol=min(len(labels), 4),
+                   frameon=False, fontsize=7)
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    return fig
 
 
 def save_pdf(path, **kwargs):
