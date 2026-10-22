@@ -616,16 +616,6 @@ class _PawleyModel:
                                "keys": [f"{tag}:{f}" for f in fn] + [f"{tag}:wscale"]})
             self.names += self.extra[-1]["keys"]
 
-    def thinned(self, k):
-        """Copy on every k-th data point (same reflections and parameters)."""
-        import copy
-        if k <= 1:
-            return self
-        t = copy.copy(self)
-        t.x, t.y, t.w, t.sw, t.B = (v[::k] for v in (self.x, self.y, self.w, self.sw, self.B))
-        t.Qb, t.Rb = np.linalg.qr(t.B * t.sw[:, None])
-        return t
-
     def unpack(self, p):
         d = dict(zip(self.names, p))
         free = [d[k] for k in self.free_names]
@@ -862,11 +852,6 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
         hi.append(8.0)
     lo, hi = np.array(lo), np.array(hi)
 
-    # basin search (scale scan, multistart) on thinned data,
-    # >= 4 points per median FWHM; the final refinement and esds use every point
-    step = float(np.median(np.diff(x))) if x.size > 1 else fwhm0
-    pc = pm.thinned(int(np.clip(fwhm0 / (4.0 * max(step, 1e-9)), 1, 10)))
-
     # --- coarse isotropic scale scan (±3 %, no displacement): a start a
     # few 0.1 % off puts every peak beside its reflection and the local
     # optimiser then lets the displacement absorb the misfit
@@ -877,7 +862,7 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
             st = list(base_free)
             for i in len_idx:
                 st[i] *= s_
-            c_ = float(np.sum(pc.residual(np.clip(full_p(st), lo, hi)) ** 2))
+            c_ = float(np.sum(pm.residual(np.clip(full_p(st), lo, hi)) ** 2))
             if c_ < best_c:
                 best_s, best_c = s_, c_
         for i in len_idx:
@@ -917,13 +902,12 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
         def r(sub):
             q = p_full.copy()
             q[mask] = sub
-            return pc.residual(q)
+            return pm.residual(q)
         sol = least_squares(r, p_full[mask], bounds=(lo[mask], hi[mask]),
                             x_scale="jac", max_nfev=25, diff_step=1e-6)
         q = p_full.copy()
         q[mask] = sol.x
-        # rank starts on the full data: thinning can reorder near-degenerate basins
-        return q, float(np.sum(pm.residual(q) ** 2)) if pc is not pm else float(np.sum(sol.fun ** 2))
+        return q, float(np.sum(sol.fun ** 2))
 
     best = None
     for s in starts:
@@ -1110,7 +1094,8 @@ def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
     if a_pc is not None:
         wl1 = _wl_tuple(kwargs.get("wavelength", 1.54056))[0]
         pc_frac = perovskite_check(m, a_pc, wl1, kwargs.get("tt_range"))
-    def one(md):
+    results, names = [], []
+    for md in models:
         name = md if isinstance(md, str) else None
         try:
             if isinstance(md, str) and md in PEROVSKITE_MODELS:
@@ -1124,13 +1109,10 @@ def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
                 r = pawley_refine(m, model=spec["spacegroup"], cell0=spec["cell"],
                                   Z=spec.get("Z"), **kwargs)
                 r.model = name
+            results.append(r)
         except Exception as e:  # keep the other models
-            r = e
-        return name or str(getattr(md, "composition", md)), r
-
-    out = [one(md) for md in models]
-    names = [o[0] for o in out]
-    results = [o[1] for o in out]
+            results.append(e)
+        names.append(name or str(getattr(md, "composition", md)))
     rows = []
     for md, r in zip(names, results):
         if isinstance(r, Exception):
