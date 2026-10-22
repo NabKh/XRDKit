@@ -10,7 +10,9 @@ Interactive XRD reference patterns from five sources, mixed in a single figure:
 - **Local structure files** — CIF, POSCAR / CONTCAR, `.vasp`, `.json`, `.xyz`, `.xsf`
 - **Crystallography Open Database (COD)** — search by formula, no API key
 - **Materials Project** — search by formula, free API key
-- **Measured or computed diffractograms** — `.xy`, `.csv`, `.txt`, `.dat`, `.tsv`, PANalytical `.xrdml`
+- **Measured or computed diffractograms** — `.xy`, `.csv`, `.txt`, `.dat`, `.tsv`, PANalytical `.xrdml`, Bruker `.brml`, Excel `.xlsx` (one pattern per sheet)
+
+plus analysis of measured patterns: peak table, Kα2 stripping, Pawley cell refinement with space-group model comparison, Williamson–Hall size/strain, zoom panels, and database matching of unassigned peaks.
 
 A browser GUI (Streamlit) for interactive use, a command-line entry point for batch rendering, and a small Python API. Vector PDF and animated GIF export.
 
@@ -79,6 +81,7 @@ Peak positions are computed from lattice parameters via Bragg's law (`xrdkit/cor
 | 2θ range | sidebar |
 | Linear background slope | sidebar |
 | (h k l) labels on peaks with intensity threshold | sidebar |
+| Intensity axis: linear, √I or log (weak and impurity peaks) | sidebar |
 | Stacked-offset vs single-baseline overlay | sidebar |
 | Sticks (Dirac) plus smooth profile, independently toggleable | sidebar |
 | Peak list table — 2θ, d-spacing, intensity, hkl, source | beneath plot, CSV download |
@@ -107,6 +110,40 @@ data = compute_difference(meas, [lib["IrO₂ rutile"]], wavelength_A=1.54184,
                           crystallite_nm=3.0, tt_range=(20, 90))
 fig, _ = make_difference_plot(data)        # overlap, R_p, scales in `data`
 ```
+
+## Analysis of measured patterns
+
+Below the plot, the **Analysis of measured patterns** section works on any uploaded measured pattern:
+
+| Tab | What it gives |
+|---|---|
+| Peak table | Automatic peak search: 2θ, d, height, FWHM, area (CSV) |
+| Kα2 stripping | Rachinger removal of the Kα2 component |
+| Cell refinement (Pawley) | Whole-pattern fit of candidate space groups; lattice parameters and volume with e.s.d.s, Rwp / GoF, models ranked by BIC; obs/calc/diff plot (PDF). Includes the five ABO₃ octahedral-tilt models (Pm-3m, R-3c, Pnma, Imma, I4/mcm), any loaded CIF phase, and additional phases refined jointly for multiphase samples |
+| Williamson–Hall | Crystallite size and microstrain from β cosθ vs 4 sinθ, with instrumental-broadening correction (constant FWHM or Caglioti U, V, W from a LaB₆ / Si standard) |
+| Zoom panels | Side-by-side 2θ windows for all samples, linear / √I / log, optional background subtraction (PDF) |
+| Unassigned peaks → database | Peaks not explained by the selected phases, matched against COD / Materials Project |
+
+The Pawley fit refines the cell (plus zero / displacement, Caglioti widths, pseudo-Voigt η, Chebyshev background); reflection intensities are free, so no atomic model is needed. Intensities and background are solved linearly at each step (variable projection, non-negative least squares).
+
+```python
+from xrdkit import load_measured_excel, compare_models, PEROVSKITE_MODELS
+
+for m in load_measured_excel("samples.xlsx"):            # one pattern per sheet
+    results, table = compare_models(m, list(PEROVSKITE_MODELS),
+                                    wavelength=(1.54056, 1.54439, 0.5),  # Cu Kα1/Kα2
+                                    tt_range=(20, 90))
+    best = min(results, key=lambda r: r.bic)
+    print(m.name, best.model, best.cell[:3], best.volume)
+```
+
+How to read the results:
+
+- **Lowest BIC wins**; ΔBIC > 10 is strong evidence. If GoF > 1, ΔBIC is inflated by roughly GoF², so check ΔBIC / GoF² as well.
+- **Rwp is relative to total counts**: a high background gives a low Rwp even for a mediocre fit. Judge the fit by the difference curve.
+- **Unindexed peaks** (spikes in the difference curve with no tick under them) mean another phase. Identify it in the database tab and add it as an additional phase before quoting the cell.
+- **e.s.d.s are statistical only**; wavelength and sample-height errors are not included.
+- Space groups with the same cell metric and the same allowed reflections (e.g. R-3c vs R-3) cannot be told apart by Pawley. That needs Rietveld.
 
 ## Command line
 
@@ -146,13 +183,12 @@ print(peaks_table(phases, 1.54184, (20, 90))[:3])
 
 ## Scope and honest limits
 
-xrdkit produces **kinematic random-powder reference patterns** for the sake of phase identification, peak-position diagnostics, figure composition, and observed−simulated difference inspection. The difference tool background-subtracts (SNIP), zero-shift aligns, and least-squares scales the reference to a measurement, reporting `R_p` / cosine overlap as *similarity* scores. It does **not** do:
+xrdkit produces **kinematic random-powder reference patterns** for phase identification, peak-position diagnostics, figure composition, and observed−simulated difference inspection, and analyses measured patterns (Pawley cell refinement, Williamson–Hall, peak search). The difference tool background-subtracts (SNIP), zero-shift aligns, and least-squares scales the reference to a measurement, reporting `R_p` / cosine overlap as *similarity* scores. It does **not** do:
 
-- a Rietveld structural refinement or true goodness-of-fit χ² (use GSAS-II / FullProf / TOPAS)
+- Rietveld structural refinement: atomic positions, occupancies, oxygen content, tilt angles (use GSAS-II / FullProf / TOPAS). The Pawley tab refines the unit cell only
 - quantitative phase analysis (the NNLS scales are a relative-abundance proxy, not weight fractions)
 - preferred-orientation modelling
 - texture / pole-figure analysis
-- size / strain separation (Williamson-Hall)
 
 DFT-relaxed Materials Project lattices can be 1–2 % larger than experimental, shifting peaks 0.1–0.3°. Prefer COD or ICDD-card values when peak positions matter. Amorphous and disordered phases (commercial Heraeus IrO₂, anodised TiO₂) are not in any structural database — no synthetic reference can reproduce them without a structural model.
 
@@ -176,7 +212,8 @@ xrdkit/
 │   ├── __init__.py             public API
 │   ├── core.py                 lattice / Bragg / pseudo-Voigt / Scherrer
 │   ├── db.py                   Phase abstraction, CIF / COD / MP loaders
-│   ├── plot.py                 figure rendering, GIF, peak table, difference tool
+│   ├── plot.py                 figure rendering, GIF, peak table, difference tool, file readers
+│   ├── analysis.py             peak search, Kα2 stripping, Pawley refinement, Williamson–Hall, database matching
 │   └── cli.py                  command-line entry
 ├── examples/
 │   └── observed_simulated_difference/   3 worked examples (data + script + figures)
@@ -195,12 +232,12 @@ pytest -q
 
 ## Comparison to existing tools
 
-xrdkit is a **figure composer**, not a refinement package.
+xrdkit is a **figure composer and quick-analysis tool**, not a Rietveld package.
 
 | Tool | What it does | xrdkit overlap |
 |---|---|---|
 | HighScore / Match! (commercial) | Phase ID + Rietveld + database | xrdkit covers the phase-ID and reference-overlay parts, free, open-source |
-| GSAS-II / FullProf / TOPAS | Full Rietveld refinement | xrdkit does not refine — feeds reference patterns for inspection only |
+| GSAS-II / FullProf / TOPAS | Full Rietveld refinement | xrdkit does Pawley (cell-only) refinement and space-group model ranking; use these for structure refinement |
 | PyXRD | Clay-mineral profile fitting | unrelated scope |
 | pymatgen's XRDCalculator | Computes patterns from a Structure | xrdkit *uses* this and wraps it in a multi-source GUI |
 

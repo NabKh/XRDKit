@@ -6,7 +6,7 @@ a full structural-refinement engine). Ordered within each group by value-to-effo
 "Quick" = a focused addition reusing machinery already in `core.py`/`plot.py`;
 "Medium"/"Larger" need a new fitting routine or UI surface.
 
-Nothing here is implemented yet — it is a menu to choose from, not a promise.
+Items marked **Done** are implemented (2026-10-22); the rest is a menu to choose from, not a promise.
 
 ---
 
@@ -33,7 +33,7 @@ Nothing here is implemented yet — it is a menu to choose from, not a promise.
   plot become weight fractions once divided by each phase's Reference Intensity
   Ratio. Honest caveats (no microabsorption, kinematic) stated up front. High
   value for mixed catalyst oxides (IrO₂/RuO₂/TiO₂).
-- **Lattice-parameter refinement from peak positions.** *Medium.* Least-squares
+- **Lattice-parameter refinement from peak positions.** **Done** (whole-pattern Pawley, Analysis → Cell refinement). *Medium.* Least-squares
   refine the unit cell from indexed d-spacings, report a, c (+ e.s.d.) and the
   delta versus the reference card — the quantitative version of "the residual
   says refine the cell."
@@ -42,24 +42,24 @@ Nothing here is implemented yet — it is a menu to choose from, not a promise.
 
 ## C. Microstructure (size & strain)
 
-- **Per-peak profile fitting.** *Medium.* Fit individual pseudo-Voigts to
+- **Per-peak profile fitting.** **Done** (Analysis → Peak table). *Medium.* Fit individual pseudo-Voigts to
   measured peaks → precise position, FWHM, and integrated area with uncertainties.
   This is the foundation the next two items build on.
-- **Williamson–Hall plot.** *Medium.* Separate size broadening from microstrain
+- **Williamson–Hall plot.** **Done** (Analysis → Williamson–Hall). *Medium.* Separate size broadening from microstrain
   by plotting βcosθ vs sinθ; report crystallite size and strain. A staple of
   nanomaterial/catalyst papers and a natural companion to the Scherrer code
   already in `core.py`.
-- **Instrumental-broadening correction.** *Quick.* Subtract a standard's FWHM
+- **Instrumental-broadening correction.** **Done** (Williamson–Hall tab). *Quick.* Subtract a standard's FWHM
   (e.g. LaB₆/Si) in quadrature before size/strain analysis, so reported sizes are
   not instrument-limited.
 
 ## D. Data handling experimentalists expect
 
-- **Peak search + auto-table.** *Quick.* Detect peaks in a measured pattern and
+- **Peak search + auto-table.** **Done** (Analysis → Peak table). *Quick.* Detect peaks in a measured pattern and
   emit a 2θ / d / relative-intensity table (mirrors the existing reference
   `peaks_table`).
-- **More instrument file formats.** *Quick–Medium.* Bruker `.raw`/`.brml`,
-  Rigaku `.ras`, plain `.xrdml` (already partly supported). Lowering the
+- **More instrument file formats.** *Quick–Medium.* Bruker `.raw`,
+  Rigaku `.ras` (`.xrdml`, Bruker `.brml` and Excel `.xlsx` are done). Lowering the
   "will it read my file?" barrier is what gets a tool actually used.
 - **Q-space / d-space x-axis toggle.** *Quick.* Offer Q = 4π·sinθ/λ or d
   alongside 2θ — expected by synchrotron and total-scattering users and for

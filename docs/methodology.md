@@ -1,6 +1,6 @@
 # xrdkit — methodology note
 
-Scope: xrdkit produces **synthetic kinematic powder XRD reference patterns** for crystalline materials, intended for phase identification, peak-position diagnostics, and figure composition. It is not a Rietveld refinement tool.
+Scope: xrdkit produces **synthetic kinematic powder XRD reference patterns** for crystalline materials, intended for phase identification, peak-position diagnostics, and figure composition. It also analyses measured patterns (peak search, Kα2 stripping, Pawley cell refinement, Williamson–Hall); see the README section *Analysis of measured patterns*. It is not a Rietveld refinement tool.
 
 ## 1. Peak positions — Bragg's law
 
@@ -109,10 +109,10 @@ For mixed-phase quantification use Rietveld refinement (GSAS-II / FullProf / TOP
 
 1. **Phase fractions** — heights are per-phase normalised, not weighted by abundance.
 2. **Preferred orientation** — ICDD intensities assume random orientation; real sprayed / coated catalyst layers are textured.
-3. **Instrument broadening** — divergence / Soller slits / detector response add Gaussian + Lorentzian contributions that are not modelled. Real FWHMs at large `D` are limited by the instrument, not by Scherrer.
-4. **Strain / microstrain** — Williamson-Hall analysis is out of scope.
+3. **Instrument broadening** — divergence / Soller slits / detector response add Gaussian + Lorentzian contributions that are not modelled in the reference patterns. Real FWHMs at large `D` are limited by the instrument, not by Scherrer. (The Pawley fit refines its own Caglioti widths; the Williamson–Hall tab takes an instrumental correction.)
+4. **Strain / microstrain** — not modelled in the reference patterns; use the Williamson–Hall tab on a measured pattern.
 5. **Amorphous background, fluorescence** — only a linear baseline is offered.
-6. **Structural refinement** — the observed−simulated difference tool (§4b) does a *linear* scale fit of fixed reference profiles to a measurement; it does not refine atomic positions, occupancies, or the unit cell, and reports similarity scores, not a Rietveld χ².
+6. **Structural refinement** — the observed−simulated difference tool (§4b) does a *linear* scale fit of fixed reference profiles to a measurement; it does not refine atomic positions, occupancies, or the unit cell, and reports similarity scores, not a Rietveld χ². Unit-cell refinement is done separately by the Pawley tab; atomic positions and occupancies are never refined.
 
 ## 7. For an experimentalist who wants to compare their data
 
@@ -128,8 +128,8 @@ To overlay a measured diffractogram in the **Upload measured / computed XRD** ta
 - **header rows to skip** — for files with comment lines.
 
 **D. Decide preprocessing before loading**:
-- Background subtraction (none / polynomial / spline) — xrdkit does not subtract for you.
-- Kα₂ stripping (Rachinger) — if your data are Kα₂-stripped, render the references with Kα₂ off, and vice versa.
+- Background subtraction — the overlay plot does not subtract for you; the difference tool, Zoom panels and Pawley fit handle background themselves.
+- Kα₂ stripping (Rachinger) — available in the Kα2 stripping tab. If your data are Kα₂-stripped, render the references with Kα₂ off, and vice versa.
 
 A typical workflow: tick the references you expect, set wavelength and 2θ range to match the scan, drag in your `.xy`, drag the `D (nm)` slider until reference peak widths roughly match the measured widths, look for unassigned peaks.
 

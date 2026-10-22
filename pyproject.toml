@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyxrdkit"
 version = "0.1.0"
-description = "Interactive multi-source XRD reference patterns: ICDD cards, CIF / POSCAR, Crystallography Open Database, Materials Project, and measured / computed diffractogram overlays."
+description = "Interactive multi-source XRD reference patterns: ICDD cards, CIF / POSCAR, Crystallography Open Database, Materials Project, measured / computed diffractogram overlays, and measured-pattern analysis (Pawley cell refinement, Williamson-Hall)."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Nabil Khossossi" }]
