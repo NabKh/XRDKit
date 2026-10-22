@@ -615,61 +615,64 @@ elif an_by:
         st.session_state.setdefault("pw_manual", {})
         usable.update(st.session_state.pw_manual)
 
-        c = st.columns([2, 3, 1])
+        TILT = {f"{k} (ABO₃ perovskite tilt model)": k for k in xa.PEROVSKITE_MODELS}
+        c = st.columns([3, 1])
         pw_names = c[0].multiselect("Patterns", an_names, default=an_names, key="pw_names")
-        pw_kind = c[1].radio(
-            "Candidates", ["reference phases", "ABO₃ perovskite tilt models"],
-            horizontal=True, key="pw_kind",
-            help="reference phases: any phase in the library, an uploaded CIF, a "
-                 "database entry or a cell typed below. Perovskite tilt models: "
-                 "Pm-3m, R-3c, Pnma, I4/mcm, Imma … built from one pseudocubic "
-                 "parameter.")
-        pw_zero = c[2].radio("Offset", ["displacement", "zero"], key="pw_zero",
+        pw_zero = c[1].radio("Offset", ["displacement", "zero"], key="pw_zero",
                              help="sample displacement (∝cosθ, Bragg–Brentano) or "
                                   "constant zero shift; refining both is ill-conditioned")
+        pw_models = st.multiselect(
+            "Candidate structures (main phase)", list(usable) + list(TILT),
+            default=[ph.name for ph in phases if ph.name in usable],
+            key="pw_cands",
+            help="Reference phases (library, uploaded CIF, database hits, cells typed "
+                 "below) start from their own cell. ABO₃ tilt models (Pm-3m, R-3c, "
+                 "Pnma, I4/mcm, Imma, …) are built from one pseudocubic parameter "
+                 "estimated from the data. Every candidate is refined and ranked by BIC.")
+        bc = st.columns(3)
+
+        def _all_tilt():
+            st.session_state.pw_cands = list(dict.fromkeys(
+                [n_ for n_ in st.session_state.get("pw_cands", []) if n_ not in TILT]
+                + list(TILT)))
+
+        def _clear_cands():
+            st.session_state.pw_cands = []
+
+        bc[0].button("Select all ABO₃ tilt models", key="pw_all_tilt", on_click=_all_tilt)
+        bc[1].button("Clear candidates", key="pw_clear", on_click=_clear_cands)
         pw_apc = 0.0
-        if pw_kind == "reference phases":
-            pw_models = st.multiselect(
-                "Candidate structures (main phase)", list(usable),
-                default=[ph.name for ph in phases if ph.name in usable],
-                key="pw_cands",
-                help="Starting cells come from the reference; each is refined "
-                     "and the candidates are ranked by BIC.")
-            with st.expander("Add a candidate by space group and cell"):
-                mc = st.columns(4)
-                m_sg = mc[0].text_input("Space group (H-M)", "", key="pw_m_sg",
-                                        placeholder="e.g. Fd-3m, P6_3mc, R-3c:H")
-                m_z = mc[1].number_input("Z (formula units)", 0, 192, 0, key="pw_m_z",
-                                         help="0 = unknown; V/Z then equals V")
-                m_nm = mc[2].text_input("Name", "", key="pw_m_nm")
-                mc2 = st.columns(6)
-                m_cell = [mc2[i].number_input(lab, 0.0, 200.0 if i < 3 else 180.0,
-                                              90.0 if i >= 3 else 0.0, format="%.4f",
-                                              key=f"pw_m_{lab}")
-                          for i, lab in enumerate(["a (Å)", "b (Å)", "c (Å)", "α", "β", "γ"])]
-                if mc[3].button("Add candidate", key="pw_m_add"):
-                    try:
-                        a_, b_, c_ = m_cell[:3]
-                        b_ = b_ or a_
-                        c_ = c_ or a_
-                        sp = xa.phase_spec({"name": m_nm or m_sg, "spacegroup": m_sg.strip(),
-                                            "cell": (a_, b_, c_, *m_cell[3:]),
-                                            "Z": m_z or None, "refine_cell": True})
-                        xa.allowed_reflections(sp["spacegroup"], sp["cell"], 1.0)
-                        st.session_state.pw_manual[sp["name"]] = sp
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Invalid candidate: {type(e).__name__}: {e}")
-            cand_specs = [usable[n_] for n_ in pw_models]
-        else:
-            pw_models = st.multiselect("Tilt models", list(xa.PEROVSKITE_MODELS),
-                                       default=["Pm-3m", "R-3c", "Pnma", "I4/mcm", "Imma"],
-                                       key="pw_models")
-            pw_apc = st.number_input("Pseudocubic a seed (Å, 0 = auto)", 0.0, 5.0, 0.0,
-                                     0.001, format="%.3f", key="pw_apc",
-                                     help="auto: from the pseudocubic 200 line. Set it "
-                                          "when the perovskite is a minority phase.")
-            cand_specs = list(pw_models)
+        if any(n_ in TILT for n_ in pw_models):
+            pw_apc = bc[2].number_input("Pseudocubic a seed (Å, 0 = auto)", 0.0, 5.0, 0.0,
+                                        0.001, format="%.3f", key="pw_apc",
+                                        help="auto: from the pseudocubic 200 line. Set it "
+                                             "when the perovskite is a minority phase.")
+        with st.expander("Add a candidate by space group and cell"):
+            mc = st.columns(4)
+            m_sg = mc[0].text_input("Space group (H-M)", "", key="pw_m_sg",
+                                    placeholder="e.g. Fd-3m, P6_3mc, R-3c:H")
+            m_z = mc[1].number_input("Z (formula units)", 0, 192, 0, key="pw_m_z",
+                                     help="0 = unknown; V/Z then equals V")
+            m_nm = mc[2].text_input("Name", "", key="pw_m_nm")
+            mc2 = st.columns(6)
+            m_cell = [mc2[i].number_input(lab, 0.0, 200.0 if i < 3 else 180.0,
+                                          90.0 if i >= 3 else 0.0, format="%.4f",
+                                          key=f"pw_m_{lab}")
+                      for i, lab in enumerate(["a (Å)", "b (Å)", "c (Å)", "α", "β", "γ"])]
+            if mc[3].button("Add candidate", key="pw_m_add"):
+                try:
+                    a_, b_, c_ = m_cell[:3]
+                    b_ = b_ or a_
+                    c_ = c_ or a_
+                    sp = xa.phase_spec({"name": m_nm or m_sg, "spacegroup": m_sg.strip(),
+                                        "cell": (a_, b_, c_, *m_cell[3:]),
+                                        "Z": m_z or None, "refine_cell": True})
+                    xa.allowed_reflections(sp["spacegroup"], sp["cell"], 1.0)
+                    st.session_state.pw_manual[sp["name"]] = sp
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Invalid candidate: {type(e).__name__}: {e}")
+        cand_specs = [TILT[n_] if n_ in TILT else usable[n_] for n_ in pw_models]
         pw_extra = st.multiselect(
             "Additional phases (refined jointly: own cell ±3 %, own peak width)",
             [n_ for n_ in usable if n_ not in pw_models], key="pw_extra",
