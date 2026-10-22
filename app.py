@@ -4,6 +4,17 @@ from __future__ import annotations
 import io
 import os
 import sys
+
+# one BLAS thread: hosted containers get 1-2 CPUs but OpenBLAS sizes its pool to
+# the host's cores, and the oversubscribed pool slows every QR/matmul many-fold
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+try:
+    from threadpoolctl import threadpool_limits
+
+    threadpool_limits(1)
+except ImportError:
+    pass
 import tempfile
 from pathlib import Path
 
