@@ -1128,12 +1128,7 @@ def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
             r = e
         return name or str(getattr(md, "composition", md)), r
 
-    # models are independent; numpy/LAPACK release the GIL, so threads overlap
-    import os
-    from concurrent.futures import ThreadPoolExecutor
-    models = list(models)
-    with ThreadPoolExecutor(max(1, min(len(models), os.cpu_count() or 1))) as ex:
-        out = list(ex.map(one, models))
+    out = [one(md) for md in models]
     names = [o[0] for o in out]
     results = [o[1] for o in out]
     rows = []
