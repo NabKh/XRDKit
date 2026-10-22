@@ -101,6 +101,8 @@ def _structure_phase(name: str, structure, color: str, source: str, info: dict) 
         peaks: PeakList = []
         for tt, I, hkls in zip(pat.x, pat.y, pat.hkls):
             hkl = tuple(int(v) for v in hkls[0]["hkl"]) if hkls else (0, 0, 0)
+            if len(hkl) == 4:  # Miller–Bravais (h k i l) → (h k l)
+                hkl = (hkl[0], hkl[1], hkl[3])
             peaks.append((float(tt), float(I), hkl))
         return peaks
     info = dict(info)

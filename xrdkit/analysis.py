@@ -217,7 +217,10 @@ def find_peaks_table(m: Measured, wavelength=1.54056, tt_range=None,
             })
     df = pd.DataFrame(rows).sort_values("two_theta").reset_index(drop=True)
     # drop components the fit shrank below threshold or to a one-step spike
-    df = df[(df["snr"] >= min_snr) & (df["fwhm"] > 1.05 * step)].reset_index(drop=True)
+    ok = ((df["snr"] >= min_snr) & (df["fwhm"] >= 3 * step)
+          & np.isfinite(df["two_theta_esd"]) & np.isfinite(df["fwhm_esd"])
+          & (df["height"] >= 3 * df["height_esd"]))
+    df = df[ok].reset_index(drop=True)
     df.attrs.update({"noise_sigma": sigma_n, "kalpha2_fitted": use_ka2,
                      "wavelength": wl1})
     return df
@@ -274,7 +277,7 @@ def caglioti_fwhm(tt, U: float, V: float, W: float):
     return np.sqrt(np.clip(U * t * t + V * t + W, 1e-12, None))
 
 
-def williamson_hall(peaks, wavelength: float = 1.54056, K: float = 0.9,
+def williamson_hall(peaks, wavelength=None, K: float = 0.9,
                     instrument=None, correction: str = "auto",
                     select: Optional[Sequence[bool]] = None) -> Dict:
     """Williamson–Hall analysis β·cosθ = Kλ/D + 4ε·sinθ.
@@ -291,6 +294,9 @@ def williamson_hall(peaks, wavelength: float = 1.54056, K: float = 0.9,
         reflections: unresolved splitting from a lower-symmetry cell broadens
         the apparent FWHM and is then misread as strain.
     """
+    if wavelength is None:
+        wavelength = peaks.attrs.get("wavelength", 1.54056)
+    wavelength = _wl_tuple(wavelength)[0]
     df = peaks if select is None else peaks[np.asarray(select, bool)]
     tt = df["two_theta"].to_numpy(float)
     f = df["fwhm"].to_numpy(float)
@@ -547,7 +553,7 @@ class PawleyResult:
             "α (°)": al, "β (°)": be, "γ (°)": ga,
             "V (Å³)": self.volume, "σV": self.volume_esd, "Z": self.Z,
             "V/Z (Å³)": self.volume_per_fu, "σ(V/Z)": self.volume_per_fu_esd,
-            "a_pc (Å)": self.a_pc,
+            "a_pc (Å)": self.a_pc if self.model in PEROVSKITE_MODELS else float("nan"),
             "zero (°)": self.zero, "σzero": self.zero_esd,
             "displ. (°)": self.displacement, "σdispl.": self.displacement_esd,
             "Rwp (%)": 100 * self.Rwp, "Rp (%)": 100 * self.Rp,
@@ -709,6 +715,8 @@ def phase_spec(ph) -> Dict:
     """
     if isinstance(ph, dict):
         out = dict(ph)
+        if "cell" not in out:
+            out = _spec_from_lattice_info(out)
         out["cell"] = tuple(float(v) for v in out["cell"])
         return out
     from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
@@ -718,15 +726,35 @@ def phase_spec(ph) -> Dict:
     if sga.get_crystal_system() == "trigonal" and sym.startswith("R"):
         sym += ":H"
     lat = conv.lattice
+    Z = int(conv.composition.get_reduced_composition_and_factor()[1])
     return {"name": f"{ph.composition.reduced_formula} {sym}", "spacegroup": sym,
-            "cell": tuple(lat.abc) + tuple(lat.angles), "refine_cell": True}
+            "cell": tuple(lat.abc) + tuple(lat.angles), "Z": Z, "refine_cell": True}
+
+
+def _spec_from_lattice_info(info: Dict) -> Dict:
+    """Spec from a reference card: {"spacegroup", "system", "a", "b"?, "c"?, angles?}."""
+    sg = str(info.get("spacegroup") or "").strip()
+    if not sg or "proxy" in sg:
+        raise ValueError("reference card has no usable space group")
+    _space_group(sg)  # validates the symbol
+    sysname = str(info.get("system", "")).lower()
+    a = float(info["a"])
+    b = float(info.get("b") or a)
+    c = float(info.get("c") or a)
+    al, be, ga = (float(info.get(k) or 90.0) for k in ("alpha", "beta", "gamma"))
+    if sysname in ("hexagonal", "hcp", "trigonal") and not info.get("gamma"):
+        ga = 120.0
+    if sg.startswith("R") and ga == 120.0 and not sg.endswith(":H"):
+        sg += ":H"
+    return {"name": info.get("name") or sg, "spacegroup": sg, "cell": (a, b, c, al, be, ga),
+            "Z": info.get("Z"), "refine_cell": True}
 
 
 def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None,
                   cell0: Optional[Sequence[float]] = None, Z: Optional[int] = None,
                   wavelength=(1.54056, 1.54439, 0.5), tt_range=None,
                   n_bkg: int = 8, refine_zero: bool = False,
-                  refine_disp: bool = True, fwhm0: float = 0.12,
+                  refine_disp: bool = True, fwhm0: Optional[float] = None,
                   multistart: bool = True, weighting: str = "auto",
                   extra_phases: Sequence = ()) -> PawleyResult:
     """Pawley fit of one measured pattern with one space-group model.
@@ -756,7 +784,9 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
 
     wl1, wl2, ratio = _wl_tuple(wavelength)
     x, y = _crop(m, tt_range)
-    if model in PEROVSKITE_MODELS:
+    if fwhm0 is None:
+        fwhm0 = _median_fwhm(x, y)
+    if model in PEROVSKITE_MODELS and cell0 is None:
         spec = PEROVSKITE_MODELS[model]
         sg_symbol = spec["sg"]
         if a_pc is None:
@@ -808,8 +838,9 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
     if refine_disp:
         lo.append(-1.0)
         hi.append(1.0)
-    lo += [0.0, -0.5, 1e-6, 0.0]
-    hi += [1.0, 0.5, 1.0, 1.0]
+    wmax = max(1.0, 4.0 * fwhm0 ** 2)  # allow nanocrystalline (FWHM of degrees)
+    lo += [0.0, -0.5 * wmax, 1e-6, 0.0]
+    hi += [wmax, 0.5 * wmax, wmax, 1.0]
     for ph in pm.extra:
         cd = dict(zip(["a", "b", "c", "alpha", "beta", "gamma"], ph["base"]))
         for k in ph["free"]:
@@ -820,6 +851,22 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
         lo.append(0.2)
         hi.append(8.0)
     lo, hi = np.array(lo), np.array(hi)
+
+    # --- coarse isotropic scale scan (±3 %, no displacement): a start a
+    # few 0.1 % off puts every peak beside its reflection and the local
+    # optimiser then lets the displacement absorb the misfit
+    len_idx = [i for i, k in enumerate(pm.free_names) if k in ("a", "b", "c")]
+    if len_idx:
+        best_s, best_c = 1.0, np.inf
+        for s_ in np.linspace(0.97, 1.03, 121):
+            st = list(base_free)
+            for i in len_idx:
+                st[i] *= s_
+            c_ = float(np.sum(pm.residual(np.clip(full_p(st), lo, hi)) ** 2))
+            if c_ < best_c:
+                best_s, best_c = s_, c_
+        for i in len_idx:
+            base_free[i] *= best_s
 
     # --- starting points: splitting directions of the pseudocubic cell ------
     starts = [list(base_free)]
@@ -948,8 +995,46 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
         x=x, y_obs=y, y_calc=yc, y_bkg=bkg, ticks=tt1,
         hkl=pm.hkl[sel], intensities=I[:int(np.sum(sel))], correlations=corr,
         extra=extra_out,
-        message=f"{sol.message} [{pm.weighting} weights]",
+        message=f"{sol.message} [{pm.weighting} weights]" + (
+            f" WARNING: GoF = {Rwp / Rexp:.1f} > 3 — misfit (wrong cell, missing "
+            "phase or false minimum); check the difference curve"
+            if Rexp and Rwp / Rexp > 3 else ""),
     )
+
+
+def _median_fwhm(x, y) -> float:
+    """Median FWHM (°) of the clearly resolved peaks; seeds the profile."""
+    from scipy.signal import find_peaks
+    step = float(np.median(np.diff(x)))
+    net = y - estimate_background(x, y)
+    idx, pr = find_peaks(net, prominence=8 * _robust_noise(net), width=1.5)
+    if idx.size == 0:
+        return 0.12
+    return float(np.clip(np.median(pr["widths"]) * step, 2 * step, 3.0))
+
+
+def perovskite_check(m: Measured, a_pc: float, wl1: float = 1.54056, tt_range=None,
+                     tol: float = 0.015) -> float:
+    """Fraction of the net intensity of the 8 strongest peaks that a primitive
+    cubic cell with parameter ``a_pc`` indexes (relative d tolerance ``tol``,
+    wide enough for split pseudocubic lines). A single-phase perovskite gives
+    ≈ 1; values well below ~0.7 mean the pattern is not (only) a perovskite
+    and the tilt-model comparison is meaningless.
+    """
+    from scipy.signal import find_peaks
+    x, y = _crop(m, tt_range)
+    net = y - estimate_background(x, y)
+    idx, pr = find_peaks(net, prominence=5 * _robust_noise(net))
+    if idx.size == 0:
+        return 0.0
+    top = idx[np.argsort(pr["prominences"])[::-1][:8]]
+    d = wl1 / (2 * np.sin(np.radians(x[top] / 2)))
+    hkl = np.array([(h, k, l) for h in range(5) for k in range(h + 1)
+                    for l in range(k + 1) if h + k + l > 0])
+    d_pc = a_pc / np.sqrt((hkl ** 2).sum(1))
+    ok = np.array([np.min(np.abs(d_pc / di - 1)) <= tol for di in d])
+    w = net[top]
+    return float(w[ok].sum() / max(w.sum(), 1e-12))
 
 
 def estimate_a_pc(m: Measured, wl1: float = 1.54056, tt_range=None) -> float:
@@ -983,9 +1068,13 @@ def estimate_a_pc(m: Measured, wl1: float = 1.54056, tt_range=None) -> float:
     raise ValueError("no perovskite 200 or 110 in range; pass a_pc explicitly")
 
 
-def compare_models(m: Measured, models: Sequence[str] = ("Pm-3m", "R-3c", "Pnma"),
+def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
                    **kwargs):
     """Refine every model and return (results list, DataFrame sorted by BIC).
+
+    Each model is a key of :data:`PEROVSKITE_MODELS`, a pymatgen Structure, or
+    a spec dict {"name", "spacegroup", "cell", "Z"} (see :func:`phase_spec`),
+    so candidate structures of any material can be compared.
 
     ΔBIC > 10 relative to the best model is conventionally strong evidence
     against it (Kass & Raftery, JASA 90, 773, 1995). Pawley fits cannot see
@@ -995,17 +1084,37 @@ def compare_models(m: Measured, models: Sequence[str] = ("Pm-3m", "R-3c", "Pnma"
     """
     import pandas as pd
     a_pc = kwargs.pop("a_pc", None)
-    if a_pc is None:
+    kwargs.pop("cell0", None)
+    kwargs.pop("Z", None)
+    if a_pc is None and any(isinstance(md, str) and md in PEROVSKITE_MODELS
+                            for md in models):
         wl1 = _wl_tuple(kwargs.get("wavelength", 1.54056))[0]
         a_pc = estimate_a_pc(m, wl1, kwargs.get("tt_range"))
-    results = []
+    pc_frac = None
+    if a_pc is not None:
+        wl1 = _wl_tuple(kwargs.get("wavelength", 1.54056))[0]
+        pc_frac = perovskite_check(m, a_pc, wl1, kwargs.get("tt_range"))
+    results, names = [], []
     for md in models:
+        name = md if isinstance(md, str) else None
         try:
-            results.append(pawley_refine(m, model=md, a_pc=a_pc, **kwargs))
+            if isinstance(md, str) and md in PEROVSKITE_MODELS:
+                r = pawley_refine(m, model=md, a_pc=a_pc, **kwargs)
+            elif isinstance(md, str):
+                raise ValueError(f"'{md}' is not a perovskite tilt model; pass a "
+                                 "Structure or a spec dict with its cell")
+            else:
+                spec = phase_spec(md)
+                name = spec["name"]
+                r = pawley_refine(m, model=spec["spacegroup"], cell0=spec["cell"],
+                                  Z=spec.get("Z"), **kwargs)
+                r.model = name
+            results.append(r)
         except Exception as e:  # keep the other models
             results.append(e)
+        names.append(name or str(getattr(md, "composition", md)))
     rows = []
-    for md, r in zip(models, results):
+    for md, r in zip(names, results):
         if isinstance(r, Exception):
             rows.append({"model": md, "error": f"{type(r).__name__}: {r}"})
         else:
@@ -1014,6 +1123,18 @@ def compare_models(m: Measured, models: Sequence[str] = ("Pm-3m", "R-3c", "Pnma"
     if "BIC" in df:
         df["ΔBIC"] = df["BIC"] - df["BIC"].min()
         df = df.sort_values("BIC").reset_index(drop=True)
+    if "Rwp (%)" in df and np.isfinite(df["Rwp (%)"].iloc[0]) and df["Rwp (%)"].iloc[0] > 20:
+        df.attrs["warning"] = (
+            f"best candidate fits with Rwp = {df['Rwp (%)'].iloc[0]:.0f} %: none of the "
+            "candidates describes this pattern; add the right phase(s)")
+    if pc_frac is not None:
+        df.attrs["perovskite_fraction"] = pc_frac
+        if pc_frac < 0.7:
+            df.attrs["warning"] = (df.attrs.get("warning", "") and df.attrs["warning"] + ". ") + (
+                f"only {100 * pc_frac:.0f} % of the strongest-peak intensity is indexed "
+                f"by a pseudocubic cell a = {a_pc:.3f} Å: this pattern is not a "
+                "single-phase perovskite, so the tilt-model ranking is not meaningful. "
+                "Refine reference-phase candidates or add the other phases.")
     return results, df
 
 

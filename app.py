@@ -22,7 +22,7 @@ from xrdkit.db import (Phase, builtin_phases, from_structure_file, from_mp_id,
 from xrdkit.plot import (Measured, load_measured, load_measured_excel,
                           make_figure, save_gif,
                           peaks_table, compute_difference, make_difference_plot,
-                          make_zoom_figure, DEFAULT_ZOOM_WINDOWS)
+                          make_zoom_figure, auto_zoom_windows)
 from xrdkit import analysis as xa
 
 
@@ -516,9 +516,15 @@ st.caption("Peak fitting, Kα2 stripping, Pawley cell refinement with space-grou
            "unassigned peaks. The wavelength is the one chosen in the sidebar "
            "(Kα1/Kα2 when the doublet box is ticked).")
 
+an_by = {m.name: m for m in measured
+         if np.sum((m.two_theta >= tt_lo) & (m.two_theta <= tt_hi)) >= 10}
+an_names = list(an_by)
+_short = [m.name for m in measured if m.name not in an_by]
+if _short:
+    st.warning("Fewer than 10 points in the 2θ range, not analysed: " + ", ".join(_short))
 if not measured:
     st.info("Upload a measured pattern (tab above) to enable the analysis tools.")
-else:
+elif an_by:
     if use_doublet:
         an_wl = (float(wl_value[0]), float(wl_value[1]), float(ka2_ratio))
     else:
@@ -526,15 +532,18 @@ else:
     an_wl1 = an_wl[0]
     st.session_state.setdefault("peak_tables", {})
     st.session_state.setdefault("pawley", {})
-    an_names = [m.name for m in measured]
-    an_by = {m.name: m for m in measured}
+
+    def _sig(name):  # data + settings a cached result depends on
+        m_ = an_by[name]
+        return (name, hash(m_.two_theta.tobytes()), hash(m_.intensity.tobytes()),
+                an_wl, tt_lo, tt_hi)
 
     (t_peaks, t_ka2, t_pawley, t_wh, t_zoom, t_match) = st.tabs([
         "Peak table", "Kα2 stripping", "Cell refinement (Pawley)",
         "Williamson–Hall", "Zoom panels", "Unassigned peaks → database"])
 
     def _peaks(name, snr):
-        key = (name, snr, an_wl, tt_lo, tt_hi)
+        key = (_sig(name), snr)
         if key not in st.session_state.peak_tables:
             st.session_state.peak_tables[key] = xa.find_peaks_table(
                 an_by[name], wavelength=an_wl, tt_range=(tt_lo, tt_hi),
@@ -550,7 +559,7 @@ else:
         st.caption(f"{len(pk)} peaks · noise σ = {pk.attrs.get('noise_sigma', float('nan')):.3g}"
                    " · esd from the fit covariance (statistical only)."
                    + (" Kα2 companions fitted at fixed ratio." if an_wl[1] else
-                      " Single wavelength: tick the Kα1/Kα2 box for Cu-tube data."))
+                      " Single wavelength: tick the Kα1/Kα2 box for laboratory tube data."))
         st.dataframe(pk, hide_index=True, use_container_width=True)
         st.download_button("Download peak table (CSV)", pk.to_csv(index=False).encode(),
                            file_name=f"{pk_name}_peaks.csv", mime="text/csv")
@@ -582,56 +591,115 @@ else:
     with t_pawley:
         st.markdown(
             "Whole-pattern Pawley fit (free intensities, Caglioti widths, pseudo-Voigt, "
-            "Chebyshev background, sample displacement) for each candidate perovskite "
-            "space group. Models are ranked by BIC; ΔBIC > 10 is strong evidence "
-            "against a model. **Pawley fits see the metric (cell shape) only:** weak "
-            "octahedral-tilt superstructure lines are not resolved at lab-XRD S/N, so "
-            "groups with the same metric are indistinguishable, and a lower-symmetry "
-            "cell always fits at least as well. esds are statistical and optimistic.")
+            "Chebyshev background, sample displacement) of each candidate structure. "
+            "Candidates are ranked by BIC; ΔBIC > 10 is strong evidence against a "
+            "candidate. A Pawley fit sees the cell metric only: space groups with the "
+            "same cell shape whose distinguishing lines are too weak to observe are "
+            "not separated, and a lower-symmetry cell always fits at least as well. "
+            "esds are statistical and optimistic.")
+
+        def _spec_of(ph):
+            if ph.info.get("structure") is not None:
+                sp = xa.phase_spec(ph.info["structure"])
+            else:
+                sp = xa.phase_spec({**ph.info, "name": ph.name})
+            sp["name"] = ph.name
+            return sp
+
+        usable = {}
+        for n_, p_ in {**LIB, **CUSTOM}.items():
+            try:
+                usable[n_] = _spec_of(p_)
+            except Exception:
+                pass
+        st.session_state.setdefault("pw_manual", {})
+        usable.update(st.session_state.pw_manual)
+
         c = st.columns([2, 3, 1])
         pw_names = c[0].multiselect("Patterns", an_names, default=an_names, key="pw_names")
-        pw_models = c[1].multiselect("Space-group models", list(xa.PEROVSKITE_MODELS),
-                                     default=["Pm-3m", "R-3c", "Pnma", "I4/mcm", "Imma"],
-                                     key="pw_models")
+        pw_kind = c[1].radio(
+            "Candidates", ["reference phases", "ABO₃ perovskite tilt models"],
+            horizontal=True, key="pw_kind",
+            help="reference phases: any phase in the library, an uploaded CIF, a "
+                 "database entry or a cell typed below. Perovskite tilt models: "
+                 "Pm-3m, R-3c, Pnma, I4/mcm, Imma … built from one pseudocubic "
+                 "parameter.")
         pw_zero = c[2].radio("Offset", ["displacement", "zero"], key="pw_zero",
                              help="sample displacement (∝cosθ, Bragg–Brentano) or "
                                   "constant zero shift; refining both is ill-conditioned")
-        with_struct = {n: p for n, p in {**LIB, **CUSTOM}.items()
-                       if p.info.get("structure") is not None}
-        c2 = st.columns([3, 1])
-        pw_extra = c2[0].multiselect(
+        pw_apc = 0.0
+        if pw_kind == "reference phases":
+            pw_models = st.multiselect(
+                "Candidate structures (main phase)", list(usable),
+                default=[ph.name for ph in phases if ph.name in usable],
+                key="pw_cands",
+                help="Starting cells come from the reference; each is refined "
+                     "and the candidates are ranked by BIC.")
+            with st.expander("Add a candidate by space group and cell"):
+                mc = st.columns(4)
+                m_sg = mc[0].text_input("Space group (H-M)", "", key="pw_m_sg",
+                                        placeholder="e.g. Fd-3m, P6_3mc, R-3c:H")
+                m_z = mc[1].number_input("Z (formula units)", 0, 192, 0, key="pw_m_z",
+                                         help="0 = unknown; V/Z then equals V")
+                m_nm = mc[2].text_input("Name", "", key="pw_m_nm")
+                mc2 = st.columns(6)
+                m_cell = [mc2[i].number_input(lab, 0.0, 200.0 if i < 3 else 180.0,
+                                              90.0 if i >= 3 else 0.0, format="%.4f",
+                                              key=f"pw_m_{lab}")
+                          for i, lab in enumerate(["a (Å)", "b (Å)", "c (Å)", "α", "β", "γ"])]
+                if mc[3].button("Add candidate", key="pw_m_add"):
+                    try:
+                        a_, b_, c_ = m_cell[:3]
+                        b_ = b_ or a_
+                        c_ = c_ or a_
+                        sp = xa.phase_spec({"name": m_nm or m_sg, "spacegroup": m_sg.strip(),
+                                            "cell": (a_, b_, c_, *m_cell[3:]),
+                                            "Z": m_z or None, "refine_cell": True})
+                        xa.allowed_reflections(sp["spacegroup"], sp["cell"], 1.0)
+                        st.session_state.pw_manual[sp["name"]] = sp
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Invalid candidate: {type(e).__name__}: {e}")
+            cand_specs = [usable[n_] for n_ in pw_models]
+        else:
+            pw_models = st.multiselect("Tilt models", list(xa.PEROVSKITE_MODELS),
+                                       default=["Pm-3m", "R-3c", "Pnma", "I4/mcm", "Imma"],
+                                       key="pw_models")
+            pw_apc = st.number_input("Pseudocubic a seed (Å, 0 = auto)", 0.0, 5.0, 0.0,
+                                     0.001, format="%.3f", key="pw_apc",
+                                     help="auto: from the pseudocubic 200 line. Set it "
+                                          "when the perovskite is a minority phase.")
+            cand_specs = list(pw_models)
+        pw_extra = st.multiselect(
             "Additional phases (refined jointly: own cell ±3 %, own peak width)",
-            list(with_struct), key="pw_extra",
-            help="For multiphase samples (e.g. Ruddlesden–Popper, La₂O₃ impurities). "
-                 "Phases come from the reference library, uploaded CIFs or the "
-                 "database tab. Overlapping lines make intensity shares and the "
-                 "perovskite cell less certain than the esds suggest.")
-        pw_apc = c2[1].number_input("a_pc seed (Å, 0 = auto)", 0.0, 5.0, 0.0, 0.001,
-                                    format="%.3f", key="pw_apc",
-                                    help="auto: from the pseudocubic 200 line. Set it "
-                                         "when the perovskite is a minority phase.")
-        if st.button("Run refinement", key="pw_run", type="primary") and pw_names and pw_models:
+            [n_ for n_ in usable if n_ not in pw_models], key="pw_extra",
+            help="For multiphase samples: impurity or secondary phases from the "
+                 "library, uploaded CIFs, the database tab or typed cells. Strongly "
+                 "overlapping lines make cells and intensity shares less certain "
+                 "than the esds suggest.")
+        if st.button("Run refinement", key="pw_run", type="primary") and pw_names and cand_specs:
             prog = st.progress(0.0)
-            try:
-                extras = [xa.phase_spec(with_struct[n].info["structure"]) for n in pw_extra]
-            except Exception as e:
-                st.error(f"Could not build additional phase: {type(e).__name__}: {e}")
-                extras = []
+            extras = [usable[n_] for n_ in pw_extra]
             for i, nm in enumerate(pw_names):
-                with st.spinner(f"{nm}: {len(pw_models)} models…"):
-                    res, df = xa.compare_models(
-                        an_by[nm], models=pw_models, wavelength=an_wl,
-                        tt_range=(tt_lo, tt_hi), a_pc=(pw_apc or None),
-                        extra_phases=extras,
-                        refine_disp=(pw_zero == "displacement"),
-                        refine_zero=(pw_zero == "zero"))
-                st.session_state.pawley[nm] = (res, df)
+                with st.spinner(f"{nm}: {len(cand_specs)} candidates…"):
+                    try:
+                        res, df = xa.compare_models(
+                            an_by[nm], models=cand_specs, wavelength=an_wl,
+                            tt_range=(tt_lo, tt_hi), a_pc=(pw_apc or None),
+                            extra_phases=extras,
+                            refine_disp=(pw_zero == "displacement"),
+                            refine_zero=(pw_zero == "zero"))
+                        st.session_state.pawley[_sig(nm)] = (res, df)
+                        if df.attrs.get("warning"):
+                            st.warning(f"{nm}: {df.attrs['warning']}")
+                    except Exception as e:
+                        st.error(f"{nm}: {type(e).__name__}: {e}")
                 prog.progress((i + 1) / len(pw_names))
-        done = [n for n in pw_names if n in st.session_state.pawley]
+        done = [n for n in pw_names if _sig(n) in st.session_state.pawley]
         if done:
             summ = []
             for nm in done:
-                res, df = st.session_state.pawley[nm]
+                res, df = st.session_state.pawley[_sig(nm)]
                 if "BIC" not in df:
                     continue
                 r0 = df.iloc[0].to_dict()
@@ -643,12 +711,15 @@ else:
                 keep = ["sample", "model", "a (Å)", "σa", "b (Å)", "σb", "c (Å)", "σc",
                         "α (°)", "β (°)", "γ (°)", "V (Å³)", "σV", "Z", "V/Z (Å³)",
                         "a_pc (Å)", "Rwp (%)", "GoF", "ΔBIC to 2nd"]
-                st.dataframe(sdf[[k for k in keep if k in sdf]], hide_index=True,
+                keep = [k for k in keep if k in sdf and not sdf[k].isna().all()]
+                st.dataframe(sdf[keep], hide_index=True,
                              use_container_width=True)
                 st.download_button("Download summary (CSV)", sdf.to_csv(index=False).encode(),
                                    file_name="pawley_summary.csv", mime="text/csv")
             sel = st.selectbox("Inspect sample", done, key="pw_inspect")
-            res, df = st.session_state.pawley[sel]
+            res, df = st.session_state.pawley[_sig(sel)]
+            if df.attrs.get("warning"):
+                st.warning(df.attrs["warning"])
             st.dataframe(df, hide_index=True, use_container_width=True)
             ok = [r for r in res if not isinstance(r, Exception)]
             if ok:
@@ -710,6 +781,10 @@ else:
                       if np.isfinite(wh["strain"]) else "—")
             wr.caption(f"R² = {wh['r2']:.3f} · {wh['correction']} correction. "
                        + (wh.get("note") or ""))
+            if (np.isfinite(wh["strain"]) and wh["strain"] < 0) or not wh["r2"] >= 0.5:
+                wr.warning("Negative strain or R² < 0.5: the line widths show no size/strain "
+                           "trend (instrument-limited, or anisotropic broadening); "
+                           "D and ε are not meaningful here.")
             if inst is None:
                 wr.warning("No instrumental correction: D is a lower bound and ε an "
                            "upper bound.")
@@ -718,12 +793,22 @@ else:
 
     with t_zoom:
         zs = st.multiselect("Patterns", an_names, default=an_names, key="zoom_names")
-        zw = st.text_input("Windows (2θ ranges, °)",
-                           "; ".join(f"{a:g}-{b:g}" for a, b in DEFAULT_ZOOM_WINDOWS),
+        auto_w = auto_zoom_windows([an_by[n] for n in zs]) if zs else []
+        zw = st.text_input("Windows (2θ ranges, °; empty = five strongest peaks)", "",
                            key="zoom_win",
-                           help="defaults bracket pseudocubic 110, 111, 200, 211, 220 for Cu Kα")
+                           placeholder="; ".join(f"{a:g}-{b:g}" for a, b in auto_w))
         try:
             wins = [tuple(float(v) for v in w.split("-")) for w in zw.split(";") if w.strip()]
+            x_lo = min(float(an_by[n].two_theta.min()) for n in zs) if zs else 0.0
+            x_hi = max(float(an_by[n].two_theta.max()) for n in zs) if zs else 0.0
+            bad = [w for w in wins if len(w) != 2 or w[1] <= w[0]
+                   or w[1] < x_lo or w[0] > x_hi]
+            if bad:
+                raise ValueError(f"windows must be lo-hi with lo < hi inside "
+                                 f"{x_lo:g}–{x_hi:g}°: {bad}")
+            wins = wins or auto_w
+            if not wins:
+                raise ValueError("no peaks found for automatic windows; type them")
             zc = st.columns(2)
             z_scale = zc[0].selectbox("Intensity axis", ["linear", "sqrt", "log"], key="zoom_y")
             z_bkg = zc[1].checkbox("subtract background", True, key="zoom_bkg")
@@ -746,7 +831,13 @@ else:
             "A high score is a hypothesis to check by overlay, not an identification.")
         c = st.columns([2, 2, 1])
         um_name = c[0].selectbox("Pattern", an_names, key="um_name")
-        um_els = c[1].text_input("Elements", "La, Sr, Mn, Ni, O", key="um_els")
+        _els = sorted({str(e) for ph in phases
+                       for e in (ph.info.get("structure").composition.elements
+                                 if ph.info.get("structure") is not None else [])})
+        um_els = c[1].text_input("Elements in the sample", ", ".join(_els), key="um_els",
+                                 placeholder="e.g. Fe, Co, O",
+                                 help="pre-filled from ticked reference phases with a "
+                                      "structure; edit to your sample's composition")
         um_tol = c[2].number_input("tol (°)", 0.05, 0.5, 0.15, step=0.01, key="um_tol")
         c = st.columns(3)
         um_src = c[0].selectbox("Database", ["auto", "cod", "mp"], key="um_src",
@@ -757,8 +848,8 @@ else:
         refsets = [np.array([p[0] for p in ph.peaks(an_wl1, (tt_lo, tt_hi))])
                    for ph in phases]
         src = "ticked reference phases"
-        if um_name in st.session_state.pawley:
-            res, df = st.session_state.pawley[um_name]
+        if _sig(um_name) in st.session_state.pawley:
+            res, df = st.session_state.pawley[_sig(um_name)]
             best = next((r for r in res if not isinstance(r, Exception)
                          and r.model == df["model"].iloc[0]), None)
             if best is not None:
@@ -770,10 +861,12 @@ else:
                    f" · {len(un)} of {len(pk)} peaks unassigned")
         st.dataframe(un[["two_theta", "d", "height", "fwhm", "snr"]], hide_index=True,
                      use_container_width=True)
-        if st.button("Search database", key="um_run", disabled=len(un) == 0):
+        um_list = [e for e in um_els.replace(" ", "").split(",") if e]
+        if st.button("Search database", key="um_run", disabled=len(un) == 0 or not um_list,
+                     help=None if um_list else "enter the elements in your sample first"):
             msg = st.empty()
             with st.spinner("querying OPTIMADE and scoring candidates…"):
-                mdf = xa.match_cod(un, pk, [e for e in um_els.replace(" ", "").split(",")],
+                mdf = xa.match_cod(un, pk, um_list,
                                    wavelength=an_wl1, tt_range=(tt_lo, tt_hi),
                                    tol=um_tol, max_subset=int(um_sub),
                                    max_strain=um_strain, source=um_src,

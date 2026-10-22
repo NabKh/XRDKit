@@ -133,6 +133,8 @@ def _read_ascii(p, delimiter=None, skiprows: int = 0):
         s = line.strip()
         if not s or s[0] in "#!%;'\"*/":
             continue
+        if "." not in s and re.search(r"\d,\d", s) and re.search(r"[;\s]", s):
+            s = s.replace(",", ".")  # decimal comma (European locale)
         nums = _NUM_RE.findall(s.replace(",", " "))
         if len(nums) < 2:
             continue
@@ -163,8 +165,9 @@ def load_measured_excel(path, color="#000000", skiprows: int = 0,
                         two_theta_offset: float = 0.0) -> List[Measured]:
     """Read every sheet of an Excel workbook as one measured pattern.
 
-    Each sheet's first two columns are taken as (2θ, intensity); header rows,
-    text cells and blank rows are dropped. Sheets without at least two numeric
+    Columns headed 2θ/angle and intensity/counts are used if present, else
+    the first two numeric columns (swapped if only the second is monotonic);
+    header rows, text cells and blank rows are dropped. Sheets without at least two numeric
     rows are skipped. The pattern is named after its sheet.
     """
     import pandas as pd
@@ -173,11 +176,28 @@ def load_measured_excel(path, color="#000000", skiprows: int = 0,
     out = []
     for sheet, df in pd.read_excel(p, sheet_name=None, header=None,
                                    skiprows=skiprows).items():
-        if df.shape[1] < 2:
+        num = df.apply(pd.to_numeric, errors="coerce")
+        cols = [c for c in num.columns if num[c].notna().sum() >= 2]
+        if len(cols) < 2:
             continue
-        xy = df.iloc[:, :2].apply(pd.to_numeric, errors="coerce").dropna()
+        # prefer columns whose header names 2θ / intensity, else the first
+        # two numeric ones; 2θ is the monotonic one
+        head = {c: " ".join(str(v).lower() for v in df[c][num[c].isna()].head(5))
+                for c in cols}
+        cx = next((c for c in cols if any(k in head[c] for k in
+                   ("2th", "2θ", "two", "theta", "angle", "deg"))), None)
+        cy = next((c for c in cols if c != cx and any(k in head[c] for k in
+                   ("int", "count", "cps", "a.u", "yobs"))), None)
+        pair = [cx if cx is not None else next(c for c in cols if c != cy),
+                cy if cy is not None else None]
+        if pair[1] is None:
+            pair[1] = next(c for c in cols if c != pair[0])
+        xy = num[pair].dropna()
         if len(xy) < 2:
             continue
+        if cx is None and not np.all(np.diff(xy.iloc[:, 0].to_numpy()) > 0) \
+                and np.all(np.diff(xy.iloc[:, 1].to_numpy()) > 0):
+            xy = xy.iloc[:, ::-1]
         two_theta = xy.iloc[:, 0].to_numpy(float) + two_theta_offset
         y = xy.iloc[:, 1].to_numpy(float) * scale
         out.append(Measured(name=str(sheet), two_theta=two_theta, intensity=y,
@@ -461,11 +481,25 @@ def make_figure(
     return fig, ax
 
 
-DEFAULT_ZOOM_WINDOWS = ((31.6, 33.4), (39.2, 41.0), (45.8, 47.4), (57.0, 59.2),
-                        (67.0, 69.2))
+def auto_zoom_windows(measured: List[Measured], n: int = 5, half_width: float = 0.9):
+    """2θ windows around the ``n`` most prominent peaks of the first pattern."""
+    from scipy.signal import find_peaks
+    if not measured:
+        return []
+    x = np.asarray(measured[0].two_theta, float)
+    y = np.asarray(measured[0].intensity, float)
+    if x.size < 10:
+        return []
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    step = float(np.median(np.diff(x))) or 0.02
+    net = y - _snip_background(y, n_iter=int(min(400, max(4, 2.5 / step))))
+    idx, pr = find_peaks(net, prominence=0, distance=max(1, int(2 * half_width / step)))
+    top = np.sort(x[idx[np.argsort(pr["prominences"])[::-1][:n]]])
+    return [(round(float(t) - half_width, 2), round(float(t) + half_width, 2)) for t in top]
 
 
-def make_zoom_figure(measured: List[Measured], windows=DEFAULT_ZOOM_WINDOWS,
+def make_zoom_figure(measured: List[Measured], windows=None,
                      phases: Optional[List[Phase]] = None, wavelength_A=1.54056,
                      subtract_background: bool = True, y_scale: str = "linear",
                      offset_step: float = 1.1, ticks=None, figsize=None):
@@ -474,8 +508,8 @@ def make_zoom_figure(measured: List[Measured], windows=DEFAULT_ZOOM_WINDOWS,
     Each trace is normalised to its own maximum *inside each window* (after
     SNIP background subtraction on the full pattern), so peak splitting and
     shifts between samples can be compared even when absolute intensities
-    differ. Default windows bracket the pseudocubic 110, 111, 200, 211 and
-    220 reflections of an ABO3 perovskite with Cu Kα.
+    differ. Without ``windows``, panels are centred on the five most
+    prominent peaks of the first pattern (:func:`auto_zoom_windows`).
 
     ``ticks`` is an optional list of (label, colour, 2θ array) drawn as rows
     of reflection markers below the traces (e.g. Pawley reflection lists).
@@ -484,6 +518,10 @@ def make_zoom_figure(measured: List[Measured], windows=DEFAULT_ZOOM_WINDOWS,
     measured = list(measured or [])
     phases = list(phases or [])
     ticks = list(ticks or [])
+    if windows is None:
+        windows = auto_zoom_windows(measured)
+    if not windows:
+        raise ValueError("no zoom windows given and no peaks found")
     n = len(windows)
     if figsize is None:
         figsize = (1.55 * n + 0.6, 0.55 * max(len(measured), 1) + 1.9)
@@ -731,14 +769,16 @@ def _snip_background(y, n_iter: int = 24):
     Works in the log-log-sqrt (LLS) domain so the estimate hugs the baseline
     without biting into Bragg peaks. ``n_iter`` sets the maximum clipping
     window (larger → smoother, flatter background)."""
-    yy = np.clip(np.asarray(y, float), 0.0, None)
+    y = np.asarray(y, float)
+    off = min(float(np.min(y)), 0.0)
+    yy = y - off
     v = np.log(np.log(np.sqrt(yy + 1.0) + 1.0) + 1.0)
-    for p in range(1, int(n_iter) + 1):
+    for p in range(1, max(1, min(int(n_iter), v.size // 2 - 1)) + 1):
         lo = np.r_[np.full(p, v[0]), v[:-p]]
         hi = np.r_[v[p:], np.full(p, v[-1])]
         v = np.minimum(v, 0.5 * (lo + hi))
     b = (np.exp(np.exp(v) - 1.0) - 1.0) ** 2 - 1.0
-    return np.clip(b, 0.0, None)
+    return np.clip(b, 0.0, None) + off
 
 
 def _best_zero_shift(grid, obs, calc, max_shift: float = 0.75, n: int = 151):
