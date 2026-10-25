@@ -71,7 +71,7 @@ def _unique(name, taken):
 # ============ SIDEBAR ============
 with st.sidebar:
     st.header("Reference cards")
-    st.caption("Built-in ICDD/JCPDS phases. Tick to add.")
+    st.caption("Built-in reference phases (line lists and COD structures). Tick to add.")
     cols = st.columns(2)
     if cols[0].button("Show all", use_container_width=True):
         for n in LIB: st.session_state[f"bi_{n}"] = True
@@ -115,7 +115,7 @@ with st.sidebar:
     st.divider()
     st.header("Plot settings")
 
-    use_doublet = st.checkbox("Kα1 / Kα2 doublet", value=False,
+    use_doublet = st.checkbox("Kα1 / Kα2 doublet", value=True,
                               help="render the Kα2 satellite at 0.5×Kα1 intensity")
     if use_doublet:
         wl_name = st.selectbox("Wavelength (Kα1 / Kα2)",
@@ -155,8 +155,8 @@ _logo = HERE / "logo" / "logo_xrdkit_white.jpeg"
 if _logo.exists():
     st.image(str(_logo), width=320)
 st.title("XRDKit - powder-XRD pattern composer")
-st.caption("Build XRD reference patterns for any crystalline material from ICDD "
-           "cards, CIF/POSCAR files, the COD, or the Materials Project. Overlay "
+st.caption("Build XRD reference patterns for any crystalline material from built-in "
+           "reference phases, CIF/POSCAR files, the COD, or the Materials Project. Overlay "
            "measured data and compute the observed-simulated difference.")
 
 tab_struct, tab_cod, tab_mp, tab_meas = st.tabs([
@@ -337,6 +337,9 @@ with tab_meas:
                                             scale=float(meas_scale),
                                             two_theta_offset=float(meas_offset))]
                 for m in loaded:
+                    taken = list(USED) + [mm.color for mm in MEASURED.values()]
+                    if m.color in taken:
+                        m.color = assign_color(taken)
                     m_name = _unique(m.name, set(MEASURED))
                     if m_name != m.name:
                         m = Measured(name=m_name, two_theta=m.two_theta,
@@ -345,6 +348,19 @@ with tab_meas:
                     MEASURED[m_name] = m
                     st.success(f"loaded **{m_name}**  ·  {m.info['n_points']} pts  ·  "
                                f"2θ {m.info['tt_range'][0]:.1f}–{m.info['tt_range'][1]:.1f}°")
+                    for w in m.info.get("warnings", []):
+                        st.warning(f"{m_name}: {w}")
+                    fwl = m.info.get("wavelength")
+                    if fwl is not None:
+                        side = float(np.atleast_1d(wl_value)[0])
+                        msg = (f"{m_name}: file records Kα1 = {fwl[0]:.5f} Å"
+                               + (f", Kα2 = {fwl[1]:.5f} Å" if fwl[1] else "")
+                               + (f", Kα2/Kα1 = {fwl[2]:.3f}" if fwl[2] else ""))
+                        if abs(fwl[0] - side) > 1e-4:
+                            st.warning(msg + f"; the sidebar wavelength is "
+                                       f"{side:.5f} Å — select the matching tube")
+                        else:
+                            st.caption(msg)
                 st.session_state.processed_upload_ids.add(fid)
             except Exception as e:
                 st.error(f"`{f.name}`: {type(e).__name__}: {e}")
@@ -358,7 +374,7 @@ phases += [CUSTOM[n] for n in CUSTOM if custom_on.get(n, True)]
 measured = [MEASURED[n] for n in MEASURED if meas_on.get(n, True)]
 
 if not phases and not measured:
-    st.info("Pick an ICDD card on the left, upload a structure or measurement, "
+    st.info("Pick a built-in phase on the left, upload a structure or measurement, "
             "or search the COD / Materials Project to begin.")
 else:
     fig, _ = make_figure(
@@ -602,12 +618,18 @@ elif an_by:
     with t_pawley:
         st.markdown(
             "Whole-pattern Pawley fit (free intensities, Caglioti widths, pseudo-Voigt, "
-            "Chebyshev background, sample displacement) of each candidate structure. "
-            "Candidates are ranked by BIC; ΔBIC > 10 is strong evidence against a "
-            "candidate. A Pawley fit sees the cell metric only: space groups with the "
-            "same cell shape whose distinguishing lines are too weak to observe are "
-            "not separated, and a lower-symmetry cell always fits at least as well. "
-            "esds are statistical and optimistic.")
+            "Chebyshev background, sample displacement or zero shift) of each candidate "
+            "structure. Candidates are ranked by BIC_eff, the BIC with the number of "
+            "points divided by the serial correlation of the residuals (neighbouring "
+            "points of a profile misfit are not independent); ΔBIC_eff > 10 is strong "
+            "evidence against a candidate. A fit is `unexplained` unless it beats a "
+            "background-only model by 10, and `poor_fit` if GoF > 3. A Pawley fit sees "
+            "the cell metric only: space groups with the same cell shape whose "
+            "distinguishing lines are too weak to observe are not separated, and a "
+            "lower-symmetry cell always fits at least as well. esds are inflated for "
+            "residual correlation; `cell sys` is the change when the 2θ offset is "
+            "refined as zero shift instead of displacement (or vice versa) and is "
+            "usually the larger error.")
 
         def _spec_of(ph):
             if ph.info.get("structure") is not None:
@@ -634,13 +656,20 @@ elif an_by:
                                   "constant zero shift; refining both is ill-conditioned")
         pw_models = st.multiselect(
             "Candidate structures (main phase)", list(usable) + list(TILT),
-            default=[ph.name for ph in phases if ph.name in usable],
+            default=([ph.name for ph in phases if ph.name in usable]
+                     or [n_ for n_ in TILT if TILT[n_] in ("Pm-3m", "R-3c", "Pnma")]),
             key="pw_cands",
             help="Reference phases (library, uploaded CIF, database hits, cells typed "
                  "below) start from their own cell. ABO₃ tilt models (Pm-3m, R-3c, "
                  "Pnma, I4/mcm, Imma, …) are built from one pseudocubic parameter "
                  "estimated from the data. Every candidate is refined and ranked by BIC.")
-        bc = st.columns(3)
+        bc = st.columns(4)
+        pw_zfix = 0.0
+        if pw_zero == "displacement":
+            pw_zfix = bc[3].number_input(
+                "fixed zero (°)", -1.0, 1.0, 0.0, 0.001, format="%.4f", key="pw_zfix",
+                help="instrument zero from a standard (Si, LaB6) on the same set-up; "
+                     "held fixed while displacement is refined")
 
         def _all_tilt():
             st.session_state.pw_cands = list(dict.fromkeys(
@@ -663,7 +692,7 @@ elif an_by:
             m_sg = mc[0].text_input("Space group (H-M)", "", key="pw_m_sg",
                                     placeholder="e.g. Fd-3m, P6_3mc, R-3c:H")
             m_z = mc[1].number_input("Z (formula units)", 0, 192, 0, key="pw_m_z",
-                                     help="0 = unknown; V/Z then equals V")
+                                     help="0 = unknown; V/Z is then not reported")
             m_nm = mc[2].text_input("Name", "", key="pw_m_nm")
             mc2 = st.columns(6)
             m_cell = [mc2[i].number_input(lab, 0.0, 200.0 if i < 3 else 180.0,
@@ -702,7 +731,8 @@ elif an_by:
                             tt_range=(tt_lo, tt_hi), a_pc=(pw_apc or None),
                             extra_phases=extras,
                             refine_disp=(pw_zero == "displacement"),
-                            refine_zero=(pw_zero == "zero"))
+                            refine_zero=(pw_zero == "zero"),
+                            zero_fixed=float(pw_zfix))
                         st.session_state.pawley[_sig(nm)] = (res, df)
                         if df.attrs.get("warning"):
                             st.warning(f"{nm}: {df.attrs['warning']}")
@@ -717,14 +747,16 @@ elif an_by:
                 if "BIC" not in df:
                     continue
                 r0 = df.iloc[0].to_dict()
-                r0["ΔBIC to 2nd"] = float(df["ΔBIC"].iloc[1]) if len(df) > 1 else float("nan")
+                dcol = "ΔBIC_eff" if "ΔBIC_eff" in df else "ΔBIC"
+                r0["ΔBIC_eff to 2nd"] = float(df[dcol].iloc[1]) if len(df) > 1 else float("nan")
                 summ.append({"sample": nm, **r0})
             if summ:
                 st.subheader("Best model per sample")
                 sdf = pd.DataFrame(summ)
                 keep = ["sample", "model", "a (Å)", "σa", "b (Å)", "σb", "c (Å)", "σc",
                         "α (°)", "β (°)", "γ (°)", "V (Å³)", "σV", "Z", "V/Z (Å³)",
-                        "a_pc (Å)", "Rwp (%)", "GoF", "ΔBIC to 2nd"]
+                        "a_pc (Å)", "Rwp (%)", "Rwp net (%)", "GoF", "DW", "esd ×",
+                        "ΔBIC_eff to 2nd", "status"]
                 keep = [k for k in keep if k in sdf and not sdf[k].isna().all()]
                 st.dataframe(sdf[keep], hide_index=True,
                              use_container_width=True)
@@ -741,6 +773,18 @@ elif an_by:
                                    index=[r.model for r in ok].index(df["model"].iloc[0])
                                    if df["model"].iloc[0] in [r.model for r in ok] else 0)
                 rr = next(r for r in ok if r.model == mdl)
+                (st.success if rr.status == xa.STATUS_OK else st.error)(
+                    f"status: **{rr.status}** · Rwp {100 * rr.Rwp:.2f} % (net {100 * rr.Rwp_net:.2f} %)"
+                    f" · GoF {rr.gof:.2f} · Durbin–Watson {rr.durbin_watson:.2f}"
+                    f" · esds ×{rr.esd_scale:.2f} · {rr.message}")
+                if rr.cell_sys:
+                    st.caption("cell sys (zero ↔ displacement): " + ", ".join(
+                        f"{k} {v:.2g}" for k, v in zip(("a", "b", "c", "α", "β", "γ"),
+                                                       rr.cell_sys) if np.isfinite(v))
+                        + (f" · V {rr.volume_sys:.2g} Å³" if np.isfinite(rr.volume_sys)
+                           else ""))
+                for w in rr.warnings:
+                    st.warning(w)
                 pfig = xa.make_pawley_plot(rr)
                 st.pyplot(pfig, use_container_width=True)
                 if rr.extra:
@@ -789,16 +833,20 @@ elif an_by:
             wl, wr = st.columns([3, 2])
             wfig = xa.make_wh_plot(wh)
             wl.pyplot(wfig, use_container_width=True); plt.close(wfig)
+            wh_ok = wh.get("consistent", True)
             wr.metric("D (nm)", f"{wh['D_nm']:.1f} ± {wh['D_nm_esd']:.1f}"
-                      if np.isfinite(wh["D_nm"]) else "—")
+                      if np.isfinite(wh["D_nm"]) and wh_ok else "—")
             wr.metric("ε (%)", f"{100 * wh['strain']:.3f} ± {100 * wh['strain_esd']:.3f}"
-                      if np.isfinite(wh["strain"]) else "—")
-            wr.caption(f"R² = {wh['r2']:.3f} · {wh['correction']} correction. "
+                      if np.isfinite(wh["strain"]) and wh_ok else "—")
+            chi = wh.get("chi2_red", np.nan)
+            wr.caption(f"R² = {wh['r2']:.3f}"
+                       + (f" · χ²_red = {chi:.2f}" if np.isfinite(chi) else "")
+                       + f" · {wh['correction']} correction. "
                        + (wh.get("note") or ""))
-            if (np.isfinite(wh["strain"]) and wh["strain"] < 0) or not wh["r2"] >= 0.5:
-                wr.warning("Negative strain or R² < 0.5: the line widths show no size/strain "
-                           "trend (instrument-limited, or anisotropic broadening); "
-                           "D and ε are not meaningful here.")
+            if np.isfinite(wh["strain"]) and wh["strain"] < 0:
+                wr.warning("Negative strain: widths fall with angle, which a size + "
+                           "microstrain model cannot produce (over-corrected "
+                           "instrument function, or overlapping low-angle lines).")
             if inst is None:
                 wr.warning("No instrumental correction: D is a lower bound and ε an "
                            "upper bound.")
@@ -858,7 +906,7 @@ elif an_by:
                                 help="auto: COD, falling back to Materials Project")
         um_strain = c[1].number_input("lattice-scale scan ± (%)", 0.0, 5.0, 1.0,
                                       step=0.5, key="um_strain") / 100
-        um_sub = c[2].number_input("max elements per phase", 1, 5, 3, key="um_sub")
+        um_sub = c[2].number_input("max elements per phase", 1, 6, 3, key="um_sub")
         refsets = [np.array([p[0] for p in ph.peaks(an_wl1, (tt_lo, tt_hi))])
                    for ph in phases]
         src = "ticked reference phases"
@@ -866,9 +914,12 @@ elif an_by:
             res, df = st.session_state.pawley[_sig(um_name)]
             best = next((r for r in res if not isinstance(r, Exception)
                          and r.model == df["model"].iloc[0]), None)
-            if best is not None:
+            if best is not None and best.status == xa.STATUS_OK and not df.attrs.get("warning"):
                 refsets.append(np.asarray(best.ticks, float))
                 src = f"Pawley {best.model} reflections" + (" + ticked phases" if phases else "")
+            elif best is not None:
+                st.caption(f"Pawley best model ({best.model}, status {best.status}) not "
+                           "used for assignment: the fit was flagged.")
         pk = _peaks(um_name, 5.0)
         un = xa.unassigned_peaks(pk, refsets, tol=um_tol) if refsets else pk
         st.caption(f"Assigned against: {src if refsets else 'nothing (run Pawley or tick a phase)'}"

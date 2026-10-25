@@ -1,11 +1,13 @@
-"""Phase abstraction and loaders: ICDD cards, local structure files, COD, MP."""
+"""Phase abstraction and loaders: built-in references, structure files, COD, MP."""
 from __future__ import annotations
 
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from xrdkit.core import MATERIALS as _PARENT_MATERIALS
 from xrdkit.core import PALETTE as _PARENT_PALETTE
@@ -41,62 +43,84 @@ def _card_phase(name: str, mat: dict, color: str, source: str) -> Phase:
     return Phase(name=name, color=color, source=source, peaks_fn=fn, info=info)
 
 
-# Additional ICDD reference cards beyond the original five PEMWE phases.
-_EXTRA_CARDS = {
+# Built-in phases computed from refined crystal structures (COD, public
+# domain): space group, cell, Wyckoff positions and U_eq = (U11+U22+U33)/3
+# copied from the cited CIF; B = 8π²·U_eq is averaged per element.
+_STRUCTURE_CARDS = {
     "IrO₂ rutile": {
-        "system": "tetragonal", "a": 4.4983, "c": 3.1544,
-        "ref": "PDF 15-870", "spacegroup": "P4_2/mnm", "color": "#117A65",
-        "hkl_I": [
-            ((1,1,0), 100.0), ((1,0,1), 80.0), ((2,0,0), 25.0),
-            ((1,1,1),  20.0), ((2,1,0), 10.0), ((2,1,1), 65.0),
-            ((2,2,0),  30.0), ((0,0,2), 18.0), ((3,1,0), 20.0),
-            ((3,0,1),  35.0), ((1,1,2), 18.0), ((3,1,1), 10.0),
-        ],
+        "ref": "COD 1548817", "cite": "Zhao & Kulik, JCTC 14, 670 (2018)",
+        "spacegroup": "P4_2/mnm", "cell": (4.5051, 4.5051, 3.1586, 90, 90, 90),
+        "sites": [("Ir", (0.0, 0.0, 0.0), 0.009467),
+                  ("O", (0.3077, 0.3077, 0.0), 0.010400)],
+        "color": "#117A65",
     },
     "RuO₂ rutile": {
-        "system": "tetragonal", "a": 4.4994, "c": 3.1071,
-        "ref": "PDF 40-1290", "spacegroup": "P4_2/mnm", "color": "#7F4FAA",
-        "hkl_I": [
-            ((1,1,0), 100.0), ((1,0,1), 80.0), ((2,0,0), 25.0),
-            ((1,1,1),  20.0), ((2,1,0), 10.0), ((2,1,1), 60.0),
-            ((2,2,0),  28.0), ((0,0,2), 16.0), ((3,1,0), 20.0),
-            ((3,0,1),  32.0), ((1,1,2), 18.0),
-        ],
+        "ref": "COD 1000058", "cite": "Bolzan et al., Acta Cryst. B 53, 373 (1997)",
+        "spacegroup": "P4_2/mnm", "cell": (4.4968, 4.4968, 3.1049, 90, 90, 90),
+        "sites": [("Ru", (0.0, 0.0, 0.0), 0.004067),
+                  ("O", (0.3053, 0.3053, 0.0), 0.006533)],
+        "color": "#7F4FAA",
     },
-    "TiO₂ brookite (proxy)": {
-        # The true Pbca brookite cell is orthorhombic; this tetragonal proxy
-        # gives the four strongest peaks roughly in the right places. Replace
-        # with a proper brookite CIF via the "Upload structure" tab for any
-        # serious brookite work.
-        "system": "tetragonal", "a": 5.4558, "c": 5.1429,
-        "ref": "PDF 29-1360 (tetragonal proxy)", "spacegroup": "Pbca (proxy)",
+    "TiO₂ brookite": {
+        "ref": "COD 9004137", "cite": "Meagher & Lager, Can. Mineral. 17, 77 (1979)",
+        "spacegroup": "Pbca", "cell": (9.174, 5.449, 5.138, 90, 90, 90),
+        "sites": [("Ti", (0.1289, 0.0972, 0.8628), 0.004733),
+                  ("O", (0.0095, 0.1491, 0.1835), 0.005833),
+                  ("O", (0.2314, 0.1110, 0.5366), 0.006763)],
         "color": "#B7950B",
-        "hkl_I": [
-            ((1,2,1),  90.0), ((1,1,1), 100.0), ((1,2,0), 20.0),
-            ((2,0,0),  20.0), ((0,1,2),  20.0),
-        ],
     },
 }
 
 
+def _builtin_structure(card: dict):
+    from pymatgen.core import Lattice, Structure
+    lat = Lattice.from_parameters(*card["cell"])
+    st = Structure.from_spacegroup(card["spacegroup"], lat,
+                                   [e for e, _, _ in card["sites"]],
+                                   [x for _, x, _ in card["sites"]])
+    B: Dict[str, List[float]] = {}
+    for e, _, u in card["sites"]:
+        B.setdefault(e, []).append(8.0 * np.pi ** 2 * u)
+    return st, {e: float(np.mean(v)) for e, v in B.items()}
+
+
 def builtin_phases() -> Dict[str, Phase]:
-    """Return all built-in ICDD-card phases keyed by display name."""
+    """Built-in reference phases keyed by display name.
+
+    Pt, Ir, α-Ti, rutile and anatase use tabulated card-style line lists
+    (PDF numbers as recorded in :data:`xrdkit.core.MATERIALS`; the values were
+    not re-checked against ICDD). IrO₂, RuO₂ and brookite are kinematic
+    patterns of the cited COD structures, with isotropic B factors."""
     out: Dict[str, Phase] = {}
     for name, mat in _PARENT_MATERIALS.items():
         out[name] = _card_phase(name, mat, _PARENT_PALETTE[name],
-                                "ICDD card (built-in)")
-    for name, mat in _EXTRA_CARDS.items():
-        out[name] = _card_phase(
-            name, {k: v for k, v in mat.items() if k != "color"},
-            mat["color"], f"ICDD card ({mat['ref']})",
-        )
+                                f"reference line list ({mat.get('ref', '')})")
+    for name, card in _STRUCTURE_CARDS.items():
+        st, B = _builtin_structure(card)
+        a, b_, c = st.lattice.abc
+        out[name] = _structure_phase(
+            name, st, card["color"], f"{card['ref']} structure ({card['cite']})",
+            {"formula": st.composition.reduced_formula, "ref": card["ref"],
+             "spacegroup": card["spacegroup"], "a": a, "c": c,
+             "lattice": dict(zip(("a", "b", "c", "α", "β", "γ"),
+                                 list(st.lattice.abc) + list(st.lattice.angles))),
+             "n_sites": len(st), "B_iso": B},
+            debye_waller=B)
     return out
 
 
-def _structure_phase(name: str, structure, color: str, source: str, info: dict) -> Phase:
+def _structure_phase(name: str, structure, color: str, source: str, info: dict,
+                     debye_waller: Optional[Dict[str, float]] = None) -> Phase:
+    """Phase whose lines are pymatgen kinematic intensities of ``structure``.
+
+    ``debye_waller`` maps element → isotropic B (Å²); without it B = 0, which
+    overestimates high-angle intensities (≈ 25 % at 2θ = 90° for B = 0.5 Å²,
+    Cu Kα). Anomalous dispersion f′, f″ is not included."""
     from pymatgen.analysis.diffraction.xrd import XRDCalculator
+    dw = dict(debye_waller) if debye_waller else None
+
     def fn(wl: float) -> PeakList:
-        calc = XRDCalculator(wavelength=float(wl))
+        calc = XRDCalculator(wavelength=float(wl), debye_waller_factors=dw)
         pat = calc.get_pattern(structure, two_theta_range=(2.0, 160.0))
         peaks: PeakList = []
         for tt, I, hkls in zip(pat.x, pat.y, pat.hkls):
@@ -107,6 +131,7 @@ def _structure_phase(name: str, structure, color: str, source: str, info: dict) 
         return peaks
     info = dict(info)
     info.setdefault("structure", structure)
+    info.setdefault("B_iso", dw or {})
     return Phase(name=name, color=color, source=source, peaks_fn=fn, info=info)
 
 
@@ -116,8 +141,11 @@ def from_cif(path, name=None, color="#444444", source_label=None) -> Phase:
 
 
 def from_structure_file(path, name=None, color="#444444",
-                         source_label=None) -> Phase:
-    """Load any pymatgen-readable structure file (CIF, POSCAR, .vasp, .json, …)."""
+                         source_label=None, debye_waller=None) -> Phase:
+    """Load any pymatgen-readable structure file (CIF, POSCAR, .vasp, .json, …).
+
+    The cell is used as given (no primitive/conventional conversion).
+    ``debye_waller``: element → B (Å²) for the intensities (default B = 0)."""
     from pymatgen.core import Structure
     p = Path(path)
     s = Structure.from_file(str(p))
@@ -133,7 +161,8 @@ def from_structure_file(path, name=None, color="#444444",
         "n_sites": int(len(s)),
     }
     return _structure_phase(name, s, color,
-                            source_label or f"file: {p.name}", info)
+                            source_label or f"file: {p.name}", info,
+                            debye_waller=debye_waller)
 
 
 def from_mp_id(mp_id, api_key=None, color="#444444", name=None) -> Phase:

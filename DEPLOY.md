@@ -37,7 +37,7 @@ That's it. Every `git push` to `main` redeploys automatically.
 
 ### Resource notes (free tier = ~1 GB RAM)
 - `pymatgen` + `mp-api` are heavy. They are only needed for the **CIF/POSCAR
-  upload** and **Materials Project search** tabs. The built-in ICDD cards, the
+  upload** and **Materials Project search** tabs. The built-in reference phases, the
   COD search, the measured-pattern overlay, and the **observed − simulated
   difference** feature all work without them.
 - If the free tier struggles with the pymatgen install, either (a) accept the

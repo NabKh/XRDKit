@@ -1,4 +1,4 @@
-"""xrdkit — interactive XRD reference patterns from ICDD cards, CIF files,
+"""xrdkit — interactive XRD reference patterns from built-in reference phases, CIF files,
 the Crystallography Open Database, the Materials Project, plus your own
 measured or computed diffractograms.
 """

@@ -54,7 +54,7 @@ wiggles where the peak position/width differ by a fraction of a degree. This is
 what a good match looks like.
 
 **2 — Rutile TiO₂.** The (211) reflection near 54.5° sits well below the value
-on the ICDD card. The residual shows this as a single deep negative excursion —
+in the reference line list. The residual shows this as a single deep negative excursion —
 the classic signature of **preferred orientation** (or a real intensity
 departure), surfaced honestly rather than normalised away.
 

@@ -6,7 +6,7 @@
 
 Interactive XRD reference patterns from five sources, mixed in a single figure:
 
-- **ICDD / JCPDS reference cards** — eight built-in PEMWE / OER phases
+- **Built-in reference phases** — eight PEMWE / OER phases (tabulated line lists and COD structures)
 - **Local structure files** — CIF, POSCAR / CONTCAR, `.vasp`, `.json`, `.xyz`, `.xsf`
 - **Crystallography Open Database (COD)** — search by formula, no API key
 - **Materials Project** — search by formula, free API key
@@ -53,22 +53,22 @@ Python 3.10+ recommended.
 python launch.py
 ```
 
-Browser tab opens at `http://localhost:8501`. Pick ICDD cards on the left, upload or search on the right, the plot updates live, click Download PDF / Download GIF.
+Browser tab opens at `http://localhost:8501`. Pick built-in phases on the left, upload or search on the right, the plot updates live, click Download PDF / Download GIF.
 
-## Built-in ICDD reference cards
+## Built-in reference phases
 
-| Phase | Card | Space group |
+| Phase | Source | Space group |
 |---|---|---|
 | Pt | PDF 04-0802 | Fm-3m |
 | Ir | PDF 06-0598 | Fm-3m |
 | α-Ti | PDF 44-1294 | P6₃/mmc |
 | TiO₂ rutile | PDF 21-1276 | P4₂/mnm |
 | TiO₂ anatase | PDF 21-1272 | I4₁/amd |
-| IrO₂ rutile | PDF 15-870 | P4₂/mnm |
-| RuO₂ rutile | PDF 40-1290 | P4₂/mnm |
-| TiO₂ brookite (proxy) | PDF 29-1360 | Pbca (proxy) |
+| IrO₂ rutile | COD 1548817 (Zhao & Kulik, JCTC 14, 670, 2018) | P4₂/mnm |
+| RuO₂ rutile | COD 1000058 (Bolzan et al., Acta Cryst. B 53, 373, 1997) | P4₂/mnm |
+| TiO₂ brookite | COD 9004137 (Meagher & Lager, Can. Mineral. 17, 77, 1979) | Pbca |
 
-Peak positions are computed from lattice parameters via Bragg's law (`xrdkit/core.py`); intensities are the kinematic random-powder values from the cited card. Wavelength is switchable.
+The first five are tabulated line lists: positions from the lattice parameters via Bragg's law, relative intensities as recorded in `xrdkit/core.py` under the cited PDF number (not re-checked against the licensed database). The last three are computed from the cited COD structures with `pymatgen` (kinematic random powder, isotropic B from the CIF U_eq), so their intensities follow the selected wavelength. Wavelength is switchable.
 
 ## Features
 
@@ -133,17 +133,22 @@ for m in load_measured_excel("samples.xlsx"):            # one pattern per sheet
     results, table = compare_models(m, list(PEROVSKITE_MODELS),
                                     wavelength=(1.54056, 1.54439, 0.5),  # Cu Kα1/Kα2
                                     tt_range=(20, 90))
-    best = min(results, key=lambda r: r.bic)
-    print(m.name, best.model, best.cell[:3], best.volume)
+    best = next(r for r in results if getattr(r, "model", None) == table["model"].iloc[0])
+    print(m.name, best.model, best.status, best.cell[:3], best.cell_sys[:3])
+    best.to_dict()                 # JSON-safe summary; best.profile_frame() → obs/calc/diff
 ```
 
 How to read the results:
 
-- **Lowest BIC wins**; ΔBIC > 10 is strong evidence. If GoF > 1, ΔBIC is inflated by roughly GoF², so check ΔBIC / GoF² as well.
-- **Rwp is relative to total counts**: a high background gives a low Rwp even for a mediocre fit. Judge the fit by the difference curve.
+- **Rank by ΔBIC_eff.** Pawley residuals are serially correlated over a peak width (Durbin–Watson well below 2), so the nominal number of points overstates the evidence. `BIC_eff` uses N_eff = N/τ, τ from the residual autocorrelation of the best fit, and the same N_eff for every model; ΔBIC_eff > 10 is strong evidence. The same τ inflates the e.s.d.s (column `esd ×`).
+- **Status `unexplained`** means the model does not beat a background-only fit (no signal, or the cell does not index the peaks); **`poor_fit`** means GoF > 3.
+- **Rwp is relative to total counts**: a high background gives a low Rwp even for a mediocre fit. `Rwp net` is computed on the background-subtracted pattern; judge the fit by it and by the difference curve.
 - **Unindexed peaks** (spikes in the difference curve with no tick under them) mean another phase. Identify it in the database tab and add it as an additional phase before quoting the cell.
-- **e.s.d.s are statistical only**; wavelength and sample-height errors are not included.
-- Space groups with the same cell metric and the same allowed reflections (e.g. R-3c vs R-3) cannot be told apart by Pawley. That needs Rietveld.
+- **e.s.d.s are statistical only.** Zero offset and sample displacement are nearly collinear; the fit refines one and repeats with the other, and the cell difference is reported as `cell_sys` — usually larger than the e.s.d. Pass `zero_fixed` from a Si / LaB₆ standard to remove it. Wavelength errors are not included.
+- Pnma and Pbnm are the same space group in two settings. Groups whose extra reflections are only weak superstructure lines (e.g. R-3 vs R-3c: their reflection lists differ) are usually not distinguishable from lab-XRD Pawley fits; that needs Rietveld or neutron data.
+- **A face-centred pattern fits Pm-3m**: an fcc metal, rock salt or fluorite indexes on a primitive cubic cell. `compare_models` warns when the strong lines carry almost no mixed-parity pseudocubic intensity (the 110 is the strongest perovskite line).
+
+Williamson–Hall: the fit is weighted by the FWHM e.s.d.s, and its validity test is the reduced χ², not R². A size-only sample has slope ≈ 0 and therefore R² ≈ 0 while being perfectly described. When the points scatter more than √10 × their e.s.d.s about the line (χ²_red > 10), the broadening is not one isotropic size plus strain (anisotropic size or strain, overlapping or split lines), and D and ε are not reported. Negative strain is flagged separately.
 
 ## Command line
 
@@ -162,6 +167,15 @@ xrdkit --wavelength "Co Kα" --tt-min 10 --tt-max 110
 ```
 
 Outputs `xrdkit_stacked.pdf`, `xrdkit_overlay.pdf`, `xrdkit.gif` in `--out`.
+
+Pawley model comparison without the GUI:
+
+```bash
+# every sheet of a workbook, perovskite tilt models + a CIF candidate, Cu Kα1/Kα2
+xrdkit analyze samples.xlsx --models Pm-3m R-3c Pnma my_phase.cif --tt-min 20 --tt-max 90 --out results/
+```
+
+For each pattern this writes `<pattern>.json` with every model (cell, e.s.d., `cell_sys`, Rwp, Rwp net, GoF, Durbin–Watson, BIC_eff, status, warnings). It also records provenance: the input file SHA-256, sheet, wavelength, 2θ range, offset model and xrdkit version. For the best model it writes `<pattern>_profile.csv` (2θ, obs, calc, background, diff) and `<pattern>_reflections.csv` (2θ, hkl, intensity). Options are `--offset zero|displacement`, `--zero-fixed`, `--a-pc` and `--strip-ka2`.
 
 ## Python API
 
@@ -190,7 +204,7 @@ xrdkit produces **kinematic random-powder reference patterns** for phase identif
 - preferred-orientation modelling
 - texture / pole-figure analysis
 
-DFT-relaxed Materials Project lattices can be 1–2 % larger than experimental, shifting peaks 0.1–0.3°. Prefer COD or ICDD-card values when peak positions matter. Amorphous and disordered phases (commercial Heraeus IrO₂, anodised TiO₂) are not in any structural database — no synthetic reference can reproduce them without a structural model.
+DFT-relaxed Materials Project lattices can be 1–2 % larger than experimental, shifting peaks 0.1–0.3°. Prefer experimental (COD) structures when peak positions matter. Amorphous and disordered phases (commercial Heraeus IrO₂, anodised TiO₂) are not in any structural database — no synthetic reference can reproduce them without a structural model.
 
 See [`docs/methodology.md`](docs/methodology.md) for the full methodology note (Bragg's law, structure factor, Scherrer, pseudo-Voigt, what an experimentalist must provide).
 

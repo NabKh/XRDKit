@@ -4,13 +4,17 @@ from __future__ import annotations
 import numpy as np
 
 
-# Single-line (Kα-averaged or pure Kα1) wavelengths in Å.
+# Single-line wavelengths in Å. "Kα" is the intensity-weighted mean
+# (2·λ_Kα1 + λ_Kα2)/3 of the doublet below; "Kα1" is the pure Kα1 line.
 WAVELENGTHS = {
     "Cu Kα": 1.54184,
     "Cu Kα1": 1.54056,
-    "Co Kα": 1.78897,
-    "Mo Kα": 0.70930,
-    "Cr Kα": 2.28970,
+    "Co Kα": 1.79026,
+    "Co Kα1": 1.78897,
+    "Mo Kα": 0.71073,
+    "Mo Kα1": 0.70930,
+    "Cr Kα": 2.29100,
+    "Cr Kα1": 2.28970,
     "Synchrotron 1.0000 Å": 1.00000,
 }
 
@@ -23,6 +27,16 @@ WAVELENGTHS_KA12 = {
     "Mo Kα1/Kα2": (0.70930, 0.71359, 0.5),
     "Cr Kα1/Kα2": (2.28970, 2.29361, 0.5),
 }
+
+
+def ka12_lines(wl: float, tol: float = 2e-4):
+    """(λ_Kα1, λ_Kα2, ratio) of the tabulated doublet whose Kα1 line or
+    weighted mean equals ``wl``; None for other (e.g. synchrotron) values."""
+    for l1, l2, r in WAVELENGTHS_KA12.values():
+        mean = (l1 + r * l2) / (1.0 + r)
+        if abs(float(wl) - l1) <= tol or abs(float(wl) - mean) <= tol:
+            return l1, l2, r
+    return None
 
 
 PALETTE = {
@@ -108,6 +122,19 @@ def pseudo_voigt(x, x0, fwhm, eta: float = 0.5):
     g = np.exp(-((x - x0) ** 2) / (2.0 * sigma * sigma))
     l = 1.0 / (1.0 + ((x - x0) / gamma) ** 2)
     return eta * l + (1.0 - eta) * g
+
+
+_PV_AREA_G = np.sqrt(np.pi / (4.0 * np.log(2.0)))
+
+
+def pv_area_factor(fwhm, eta):
+    """Area of a unit-height pseudo-Voigt: FWHM·(η·π/2 + (1−η)·√(π/4ln2))."""
+    return fwhm * (eta * 0.5 * np.pi + (1.0 - eta) * _PV_AREA_G)
+
+
+def pseudo_voigt_area(x, x0, fwhm, eta: float = 0.5):
+    """Unit-area pseudo-Voigt: integrated intensity is conserved as FWHM grows."""
+    return pseudo_voigt(x, x0, fwhm, eta) / pv_area_factor(fwhm, eta)
 
 
 def scherrer_fwhm_deg(two_theta_deg: float, wavelength_A: float,

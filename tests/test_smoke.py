@@ -20,11 +20,11 @@ def test_builtin_phases_load():
     for ph in lib.values():
         assert isinstance(ph, Phase)
         assert ph.color.startswith("#")
-        assert "ICDD card" in ph.source
+        assert ph.source
 
 
 def test_bragg_pt_111_cu_kalpha1():
-    """Pt(111) at Cu Kα1 should be 39.76° (ICDD card value)."""
+    """Pt(111) at Cu Kα1 should be 39.76° (reference line list)."""
     peaks = two_theta_peaks(MATERIALS["Pt"], WAVELENGTHS["Cu Kα1"])
     p111 = next(p for p in peaks if p[2] == (1, 1, 1))
     assert abs(p111[0] - 39.764) < 0.03
@@ -32,7 +32,7 @@ def test_bragg_pt_111_cu_kalpha1():
 
 
 def test_bragg_tio2_anatase_101_cu_kalpha1():
-    """Anatase (101) at Cu Kα1 should be 25.28° (ICDD card value)."""
+    """Anatase (101) at Cu Kα1 should be 25.28° (reference line list)."""
     peaks = two_theta_peaks(MATERIALS["TiO₂ anatase"], WAVELENGTHS["Cu Kα1"])
     p101 = next(p for p in peaks if p[2] == (1, 0, 1))
     assert abs(p101[0] - 25.28) < 0.03

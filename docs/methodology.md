@@ -20,20 +20,19 @@ Changing the wavelength dropdown shifts every peak to its correct new position. 
 
 ## 2. Peak intensities — kinematic random-powder
 
-For the eight built-in phases the relative intensities are the values from the ICDD / JCPDS powder-diffraction reference cards cited in `xrdkit/core.py`:
+Five built-in phases use tabulated relative intensities recorded in `xrdkit/core.py` under the PDF numbers below (the values were not re-checked against the licensed database):
 
-| Phase | Card |
+| Phase | Line list |
 |---|---|
 | Pt | PDF 04-0802 |
 | Ir | PDF 06-0598 |
 | α-Ti | PDF 44-1294 |
 | TiO₂-rutile | PDF 21-1276 |
 | TiO₂-anatase | PDF 21-1272 |
-| IrO₂-rutile | PDF 15-870 |
-| RuO₂-rutile | PDF 40-1290 |
-| TiO₂-brookite (proxy) | PDF 29-1360 |
 
-Each card value corresponds to the kinematic intensity of a randomly-oriented polycrystalline sample at Cu Kα:
+IrO₂ rutile (COD 1548817), RuO₂ rutile (COD 1000058) and TiO₂ brookite (COD 9004137) are computed from those refined structures by `pymatgen` at the selected wavelength, with isotropic B = 8π²U_eq from the CIF averaged per element.
+
+Each tabulated value corresponds to the kinematic intensity of a randomly-oriented polycrystalline sample at Cu Kα:
 
 ```
 I_hkl ∝ |F_hkl|² · m_hkl · LP(θ_hkl) · exp(−2B sin²θ/λ²)
@@ -44,9 +43,9 @@ I_hkl ∝ |F_hkl|² · m_hkl · LP(θ_hkl) · exp(−2B sin²θ/λ²)
 - `LP(θ)` — Lorentz-polarisation factor `(1+cos²2θ)/(sin²θ cosθ)` for Bragg-Brentano geometry
 - `exp(−2B sin²θ/λ²)` — Debye-Waller thermal factor
 
-Card values are already integrated over all of that. Consequence: the intensities are rigorously correct at Cu Kα and approximately correct at other wavelengths (LP factor and `f_j(sinθ/λ)` weighting drift with λ).
+Tabulated values are already integrated over all of that. Consequence: the intensities are rigorously correct at Cu Kα and approximately correct at other wavelengths (LP factor and `f_j(sinθ/λ)` weighting drift with λ).
 
-For structures loaded from CIF / POSCAR / COD / Materials Project the full structure-factor calculation is performed by `pymatgen.analysis.diffraction.xrd.XRDCalculator` at the requested wavelength.
+For structures loaded from CIF / POSCAR / COD / Materials Project the full structure-factor calculation is performed by `pymatgen.analysis.diffraction.xrd.XRDCalculator` at the requested wavelength. The Debye–Waller factor is applied only when B values are given (`debye_waller=` in `from_structure_file`); otherwise B = 0, which overestimates high-angle intensities (≈ 25 % at 2θ = 90° for B = 0.5 Å², Cu Kα). Anomalous dispersion is not included.
 
 ## 3. Peak shape — pseudo-Voigt with Scherrer broadening
 
@@ -108,7 +107,7 @@ For mixed-phase quantification use Rietveld refinement (GSAS-II / FullProf / TOP
 ## 6. What xrdkit does not model
 
 1. **Phase fractions** — heights are per-phase normalised, not weighted by abundance.
-2. **Preferred orientation** — ICDD intensities assume random orientation; real sprayed / coated catalyst layers are textured.
+2. **Preferred orientation** — reference intensities assume random orientation; real sprayed / coated catalyst layers are textured.
 3. **Instrument broadening** — divergence / Soller slits / detector response add Gaussian + Lorentzian contributions that are not modelled in the reference patterns. Real FWHMs at large `D` are limited by the instrument, not by Scherrer. (The Pawley fit refines its own Caglioti widths; the Williamson–Hall tab takes an instrumental correction.)
 4. **Strain / microstrain** — not modelled in the reference patterns; use the Williamson–Hall tab on a measured pattern.
 5. **Amorphous background, fluorescence** — only a linear baseline is offered.
@@ -135,17 +134,43 @@ A typical workflow: tick the references you expect, set wavelength and 2θ range
 
 ## 8. Computational / DFT users
 
-The **Upload structure** tab accepts CIF, POSCAR / CONTCAR, `.vasp`, `.json`, `.xyz`, `.xsf` — anything pymatgen reads. Loaded structures are converted to a primitive cell, the space group is detected, and the kinematic powder pattern is computed.
+The **Upload structure** tab accepts CIF, POSCAR / CONTCAR, `.vasp`, `.json`, `.xyz`, `.xsf` — anything pymatgen reads. The cell is used as given (no primitive or conventional conversion; the pattern does not depend on the choice), the space group is detected for display, and the kinematic powder pattern is computed.
 
 A common workflow: relax your structure in VASP, drop the CONTCAR in, compare against a measured pattern uploaded in the next tab. DFT-relaxed lattices typically over-estimate `a` by 1–2 % (PBE/GGA), shifting peaks 0.1–0.3°; account for this when interpreting offsets.
 
+## 9. Statistics of the Pawley fit
+
+These rules are in `xrdkit/analysis.py` (`counting_weights`, `_serial_correlation`, `pawley_refine`, `compare_models`, `williamson_hall`).
+
+- **Weights.** `weighting="auto"` uses Poisson weights (σ² = y) only if the point-to-point noise matches √(background), which is true when the file holds raw counts. Data that were scaled, averaged, smoothed or offset get uniform weights, with σ estimated from the MAD of first differences. The weighting used is reported in `message`.
+- **Serial correlation.** Profile residuals are correlated over about one peak width, so the least-squares esds are too small. xrdkit reports:
+  - the Durbin–Watson statistic d, which is about 2 for white residuals;
+  - the integrated autocorrelation τ = 1 + 2 Σ_k ρ_k, summed over lags up to one mean FWHM and stopped at the first ρ_k ≤ 0;
+  - esds multiplied by √τ (`esd_scale`), following the idea of Bérar & Lelann (1991).
+- **Effective BIC.** Correlated points are not independent observations, so the information count is N_eff = N/τ. BIC_eff = N_eff · ln(χ²/N) + P · ln N_eff, where P is the number of non-linear parameters plus the active linear ones (non-zero intensities and background terms).
+  - `compare_models` uses τ from the best fit for every candidate, so the ranking is on the same N_eff.
+  - A ΔBIC_eff above 10 is strong preference. Below about 6 the models are not distinguished.
+- **Null model and status.** Every fit is compared with a background-only fit on the same data.
+  - `unexplained`: BIC_eff does not beat BIC_null_eff by at least 10. Either there is no signal, or this cell does not index the observed peaks, for example a different phase.
+  - `poor_fit`: GoF = Rwp/Rexp > 3.
+  - `ok`: otherwise.
+  - A status of `ok` does not prove the cell is correct. Read it together with the difference curve and Durbin–Watson d.
+- **Rwp vs Rwp_net.** A high background makes Rwp small by itself. Rwp_net uses the background-subtracted observed intensity in the denominator and is the one to quote when the background dominates.
+- **cell_sys.** Zero shift (Δ2θ constant) and specimen displacement (Δ2θ ∝ cos θ) are almost collinear with the cell over a short 2θ range. When one of them is refined, the fit is repeated with the other one instead. |Δcell| between the two is reported as `cell_sys` / `volume_sys`. It is a systematic error bar. If it is larger than the statistical esd, quote it, or calibrate the zero against a standard and pass `zero_fixed`.
+- **Perovskite checks.** A tilt-model ranking needs the strong lines to index on a pseudocubic cell.
+  - If less than 70 % of the strongest-peak intensity indexes on that cell, the ranking is flagged as not meaningful.
+  - If the lines index but less than 10 % of their intensity is on mixed-parity pseudocubic hkl (where the perovskite 110 must be strongest), the pattern is flagged as fcc metal, rock-salt or fluorite, not perovskite.
+- **Williamson–Hall validity.** R² is not a validity test, because a pure-size sample has slope ≈ 0 and R² ≈ 0. With FWHM esds, the weighted reduced χ² of the line is computed. If χ²_red > 10, the points scatter far more than their esds, the broadening is not one isotropic size plus strain (anisotropic size or strain, stacking faults, overlapping phases), and D and ε are reported as not meaningful.
+
 ## References
+
+- Bérar, J.-F. & Lelann, P. E.s.d.'s and estimated probable error obtained in Rietveld refinements with local correlations. *J. Appl. Cryst.* **24**, 1–5 (1991). doi:10.1107/S0021889890008391
 
 - Cullity, B. D. & Stock, S. R. *Elements of X-Ray Diffraction*, 3rd ed., Prentice Hall, 2001.
 - Birkholz, M. *Thin Film Analysis by X-Ray Scattering*, Wiley-VCH, 2006.
 - Pecharsky, V. K. & Zavalij, P. Y. *Fundamentals of Powder Diffraction and Structural Characterization*, 2nd ed., Springer, 2009.
 - Scherrer, P. *Nachr. Ges. Wiss. Göttingen*, **1918**, 98–100.
-- ICDD / JCPDS card numbers as cited per phase in §2.
+- PDF numbers and COD entries as cited per phase in §2.
 - Materials Project: Jain et al., *APL Materials* **1**, 011002 (2013).
 - Crystallography Open Database: Gražulis et al., *J. Appl. Cryst.* **42**, 726 (2009).
 - pymatgen: Ong et al., *Comput. Mater. Sci.* **68**, 314 (2013).

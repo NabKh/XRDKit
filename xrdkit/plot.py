@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.ticker import MultipleLocator
 
-from xrdkit.core import NATURE_RC, pseudo_voigt, scherrer_fwhm_deg
+from xrdkit.core import NATURE_RC, ka12_lines, pseudo_voigt_area, scherrer_fwhm_deg
 from xrdkit.db import Phase
 
 
@@ -49,6 +49,81 @@ def _read_xrdml(p):
     if step is None:
         step = (end - start) / max(len(intensities) - 1, 1)
     return start + step * np.arange(len(intensities)), intensities
+
+
+def _sha256(p) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _file_wavelength(p):
+    """(λ_Kα1, λ_Kα2, ratio) recorded in a .xrdml / .brml file, else None.
+
+    PANalytical: <usedWavelength><kAlpha1>, <kAlpha2>, <ratioKAlpha2KAlpha1>.
+    Bruker: <WaveLengthAlpha1 Value=…>, <WaveLengthAlpha2>, <WaveLengthRatio>.
+    Best effort; files that do not record the tube line return None."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    roots = []
+    try:
+        if zipfile.is_zipfile(p):
+            with zipfile.ZipFile(p) as z:
+                roots = [ET.fromstring(z.read(n)) for n in z.namelist()
+                         if n.lower().endswith(".xml")][:20]
+        else:
+            roots = [ET.parse(p).getroot()]
+    except Exception:
+        return None
+    keys = {"kalpha1": 0, "wavelengthalpha1": 0, "kalpha2": 1, "wavelengthalpha2": 1,
+            "ratiokalpha2kalpha1": 2, "wavelengthratio": 2}
+    val = [None, None, None]
+    for root in roots:
+        for el in root.iter():
+            k = keys.get(el.tag.split("}")[-1].lower())
+            if k is None or val[k] is not None:
+                continue
+            txt = (el.text or "").strip() or el.get("Value") or ""
+            try:
+                val[k] = float(txt)
+            except ValueError:
+                pass
+    if not val[0] or not (0.1 < val[0] < 5.0):
+        return None
+    ratio = val[2] if val[2] is not None and 0 <= val[2] <= 1 else 0.5
+    wl2 = val[1] if val[1] and val[1] > val[0] else None
+    return val[0], wl2, ratio
+
+
+def _clean_xy(two_theta, y, label):
+    """Finite, strictly increasing 2θ; returns (x, y, warnings)."""
+    x = np.asarray(two_theta, float)
+    y = np.asarray(y, float)
+    warns = []
+    ok = np.isfinite(x) & np.isfinite(y)
+    if not ok.all():
+        warns.append(f"{int((~ok).sum())} non-finite rows dropped")
+        x, y = x[ok], y[ok]
+    if x.size and np.any(np.diff(x) <= 0):
+        order = np.argsort(x, kind="stable")
+        x, y = x[order], y[order]
+        keep = np.concatenate([[True], np.diff(x) > 0])
+        if not keep.all():
+            warns.append(f"{int((~keep).sum())} duplicate 2θ values dropped")
+        x, y = x[keep], y[keep]
+        warns.append("2θ was not increasing; data sorted")
+    if x.size < 2:
+        raise ValueError(f"{label}: fewer than two valid (2θ, intensity) rows")
+    if np.any(y < 0):
+        warns.append(f"{int((y < 0).sum())} negative intensities (background-"
+                     "subtracted or offset data?): Poisson weighting is not valid")
+    if x.min() < 0 or x.max() > 180:
+        warns.append(f"2θ spans {x.min():g}–{x.max():g}°: is the first column 2θ?")
+    return x, y, warns
 
 
 def _read_brml(p):
@@ -173,6 +248,7 @@ def load_measured_excel(path, color="#000000", skiprows: int = 0,
     import pandas as pd
 
     p = Path(path)
+    digest = _sha256(p)
     out = []
     for sheet, df in pd.read_excel(p, sheet_name=None, header=None,
                                    skiprows=skiprows).items():
@@ -198,12 +274,19 @@ def load_measured_excel(path, color="#000000", skiprows: int = 0,
         if cx is None and not np.all(np.diff(xy.iloc[:, 0].to_numpy()) > 0) \
                 and np.all(np.diff(xy.iloc[:, 1].to_numpy()) > 0):
             xy = xy.iloc[:, ::-1]
-        two_theta = xy.iloc[:, 0].to_numpy(float) + two_theta_offset
-        y = xy.iloc[:, 1].to_numpy(float) * scale
+        try:
+            two_theta, y, warns = _clean_xy(xy.iloc[:, 0].to_numpy(float),
+                                            xy.iloc[:, 1].to_numpy(float),
+                                            f"{p.name} [{sheet}]")
+        except ValueError:
+            continue
+        two_theta = two_theta + two_theta_offset
+        y = y * scale
         out.append(Measured(name=str(sheet), two_theta=two_theta, intensity=y,
                             color=color, source=f"file: {p.name} [{sheet}]",
                             info={"path": str(p), "sheet": str(sheet),
-                                  "n_points": len(two_theta),
+                                  "sha256": digest,
+                                  "n_points": len(two_theta), "warnings": warns,
                                   "tt_range": (float(two_theta.min()),
                                                float(two_theta.max()))}))
     if not out:
@@ -252,21 +335,44 @@ def load_measured(path, name=None, color="#000000", delimiter=None,
                 two_theta, y = _read_xrdml(p)
             else:
                 raise
-    two_theta = two_theta.astype(float) + two_theta_offset
-    y = y.astype(float) * scale
+    two_theta, y, warns = _clean_xy(two_theta, y, p.name)
+    two_theta = two_theta + two_theta_offset
+    y = y * scale
+    info = {"path": str(p), "sha256": _sha256(p), "n_points": len(two_theta),
+            "warnings": warns,
+            "tt_range": (float(two_theta.min()), float(two_theta.max()))}
+    if head[:4] == b"PK\x03\x04" or head.lstrip()[:1] == b"<":
+        wl = _file_wavelength(p)
+        if wl is not None:
+            info["wavelength"] = wl
     return Measured(name=name or p.stem, two_theta=two_theta, intensity=y,
-                    color=color, source=f"file: {p.name}",
-                    info={"path": str(p), "n_points": len(two_theta),
-                          "tt_range": (float(two_theta.min()),
-                                        float(two_theta.max()))})
+                    color=color, source=f"file: {p.name}", info=info)
 
 
 def _compute_pattern_single(grid, peaks, wavelength_A, crystallite_nm, eta):
+    """Sum of unit-area profiles scaled by the integrated intensity I.
+
+    Card and pymatgen intensities are integrated intensities, so a broader
+    (high-angle) line keeps its area and gets a lower peak height."""
     y = np.zeros_like(grid)
     for tt, I, _ in peaks:
         fwhm = scherrer_fwhm_deg(tt, wavelength_A, crystallite_nm)
-        y += I * pseudo_voigt(grid, tt, fwhm, eta)
+        y += I * pseudo_voigt_area(grid, tt, fwhm, eta)
     return y
+
+
+def _wavelength_list(wavelength_A, kalpha12, kalpha2_ratio):
+    """[(λ, weight), …] for the profile; Kα2 of a scalar λ from the table."""
+    if isinstance(wavelength_A, (tuple, list)):
+        wl1, wl2 = float(wavelength_A[0]), float(wavelength_A[1])
+        return wl1, ([(wl1, 1.0), (wl2, kalpha2_ratio)] if kalpha12 else [(wl1, 1.0)])
+    wl1 = float(wavelength_A)
+    if not kalpha12:
+        return wl1, [(wl1, 1.0)]
+    lines = ka12_lines(wl1)
+    if lines is None:
+        raise ValueError(f"no tabulated Kα2 line for λ = {wl1} Å; pass (λ_Kα1, λ_Kα2)")
+    return lines[0], [(lines[0], 1.0), (lines[1], kalpha2_ratio)]
 
 
 def _compute_pattern(grid, peaks, wavelengths, crystallite_nm, eta):
@@ -381,7 +487,7 @@ def make_figure(
     wavelength_A : float or tuple
         Either a single Å value (Kα average) or, for Kα1/Kα2 mode, a
         ``(λ_Kα1, λ_Kα2)`` tuple in Å. When ``kalpha12=True`` and a single λ
-        is passed, λ is used as Kα1 and λ_Kα2 = λ + 0.004 Å as a default.
+        is passed, its Kα1/Kα2 lines are taken from ``WAVELENGTHS_KA12``.
     measured : list of Measured, optional
         Overlay traces (already-2θ-vs-I curves).
     show_hkl_labels : bool
@@ -400,14 +506,7 @@ def make_figure(
     plt.rcParams.update(NATURE_RC)
     measured = list(measured or [])
 
-    if isinstance(wavelength_A, (tuple, list)):
-        wl1, wl2 = float(wavelength_A[0]), float(wavelength_A[1])
-        wavelengths = [(wl1, 1.0), (wl2, kalpha2_ratio)] if kalpha12 else [(wl1, 1.0)]
-    else:
-        wl1 = float(wavelength_A)
-        wavelengths = [(wl1, 1.0)]
-        if kalpha12:
-            wavelengths.append((wl1 + 0.004, kalpha2_ratio))
+    wl1, wavelengths = _wavelength_list(wavelength_A, kalpha12, kalpha2_ratio)
 
     n_p = len(phases)
     n_m = len(measured)
@@ -601,14 +700,7 @@ def save_gif(
     plt.rcParams.update(NATURE_RC)
     measured = list(measured or [])
 
-    if isinstance(wavelength_A, (tuple, list)):
-        wl1, wl2 = float(wavelength_A[0]), float(wavelength_A[1])
-        wavelengths = [(wl1, 1.0), (wl2, kalpha2_ratio)] if kalpha12 else [(wl1, 1.0)]
-    else:
-        wl1 = float(wavelength_A)
-        wavelengths = [(wl1, 1.0)]
-        if kalpha12:
-            wavelengths.append((wl1 + 0.004, kalpha2_ratio))
+    wl1, wavelengths = _wavelength_list(wavelength_A, kalpha12, kalpha2_ratio)
 
     n_p = len(phases)
     n_m = len(measured)
@@ -847,14 +939,7 @@ def compute_difference(measured, phases, wavelength_A,
     calc, diff, scales, names, colors, peaks_per_phase, exp_name, shift,
     plus the residual figures of merit (Rp, Rwp, overlap).
     """
-    if isinstance(wavelength_A, (tuple, list)):
-        wl1, wl2 = float(wavelength_A[0]), float(wavelength_A[1])
-        wavelengths = [(wl1, 1.0), (wl2, kalpha2_ratio)] if kalpha12 else [(wl1, 1.0)]
-    else:
-        wl1 = float(wavelength_A)
-        wavelengths = [(wl1, 1.0)]
-        if kalpha12:
-            wavelengths.append((wl1 + 0.004, kalpha2_ratio))
+    wl1, wavelengths = _wavelength_list(wavelength_A, kalpha12, kalpha2_ratio)
 
     grid = np.linspace(tt_range[0], tt_range[1], int(n_grid))
 

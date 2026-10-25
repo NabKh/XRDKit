@@ -43,8 +43,8 @@ EXAMPLES = [
     dict(xy="accurate_rutilo_tio2_experimental.xy", phases=["TiO₂ rutile"],
          D=9.0, eta=0.4, tt=(15.0, 80.0),
          out="ex2_rutile_tio2",
-         note="rutile TiO2 -- oxide where (211) intensity departs from the ICDD "
-              "card (preferred orientation), shown honestly in the residual"),
+         note="rutile TiO2 -- oxide where (211) intensity departs from the reference "
+              "line list (preferred orientation), shown honestly in the residual"),
     dict(xy="realistic_iro2_experiment.xy", phases=["IrO₂ rutile"],
          D=3.0, eta=0.5, tt=(20.0, 90.0),
          out="ex3_iro2_oer",

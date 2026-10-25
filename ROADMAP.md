@@ -18,7 +18,7 @@ Items marked **Done** are implemented (2026-10-22); the rest is a menu to choose
   `Measured`. This is the single most-wanted feature for electrocatalysis: track
   what changes after potential cycling, dissolution, or restructuring. Directly
   serves PEMWE/OER degradation studies.
-- **Stacked operando / time-series view.** *Medium.* Load N patterns (a time or
+- **Stacked operando / time-series view.** *Medium.* Not started. Load N patterns (a time or
   potential series) and render a waterfall or 2D heat-map with the same Nature
   styling, optionally with a difference-to-first-frame strip.
 - **Residual diagnostics readout.** *Quick.* Flag whether the residual is
@@ -73,6 +73,10 @@ Items marked **Done** are implemented (2026-10-22); the rest is a menu to choose
   CIF/MP tabs load on demand (see `DEPLOY.md`). *Quick.*
 - **Example-data picker** in the UI ("try it with Pt / TiO₂ / IrO₂") so a
   first-time experimentalist sees a result in one click. *Quick.*
+- **Command-line batch analysis + JSON export.** **Done** (`xrdkit analyze`). Ranks
+  candidate cells per file and writes `<stem>.json` (fit statistics, status,
+  provenance with input SHA-256) plus profile and reflection CSVs; also
+  `PawleyResult.to_dict()` in Python. Not yet in the app UI.
 - **Session export/import** (save the whole composed figure + settings as a
   small JSON) for reproducibility and sharing. *Medium.*
 

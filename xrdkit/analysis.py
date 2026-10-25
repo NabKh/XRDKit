@@ -11,10 +11,12 @@
 * :func:`unassigned_peaks` / :func:`match_cod` — rank COD entries against the
   peaks a model does not explain (minor / secondary phases).
 
-Conventions: angles in degrees 2θ, wavelengths in Å, d in Å. Uncertainties are
-1σ from the least-squares covariance scaled by the reduced χ². Point-to-point
-correlated residuals make these estimates optimistic (Bérar & Lelann, J. Appl.
-Cryst. 24, 1, 1991); treat them as lower bounds.
+Conventions: angles in degrees 2θ, wavelengths in Å, d in Å. Pawley
+uncertainties are 1σ from the least-squares covariance scaled by the reduced
+χ² and then inflated for serially correlated residuals (Bérar & Lelann, J.
+Appl. Cryst. 24, 1, 1991; see :func:`_serial_correlation`). They are still
+statistical only: the zero/displacement choice adds a systematic error that is
+reported separately (``cell_sys``).
 """
 from __future__ import annotations
 
@@ -25,14 +27,44 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from xrdkit.core import pseudo_voigt
+from xrdkit.core import _PV_AREA_G
+from xrdkit.core import pv_area_factor as _pv_area_factor
 from xrdkit.plot import Measured, _snip_background
 
-_PV_AREA_G = np.sqrt(np.pi / (4.0 * np.log(2.0)))
+# Status codes of a Pawley fit (PawleyResult.status)
+# "unexplained": the model's reflections do not beat a background-only fit,
+# because there is no signal or because this cell does not index it.
+STATUS_OK, STATUS_POOR, STATUS_UNEXPLAINED = "ok", "poor_fit", "unexplained"
+STATUS_NO_SIGNAL = STATUS_UNEXPLAINED   # backwards-compatible alias
 
 
-def _pv_area_factor(fwhm, eta):
-    """Area of a unit-height pseudo-Voigt: FWHM·(η·π/2 + (1−η)·√(π/4ln2))."""
-    return fwhm * (eta * 0.5 * np.pi + (1.0 - eta) * _PV_AREA_G)
+def _blas_quiet():
+    """numpy 2.x on macOS Accelerate emits spurious 'divide by zero / overflow
+    encountered in matmul' warnings on finite inputs; callers check results."""
+    return np.errstate(divide="ignore", over="ignore", invalid="ignore")
+
+
+def _serial_correlation(r, max_lag: int):
+    """Durbin–Watson d and esd inflation of correlated weighted residuals r.
+
+    The inflation is √τ with τ = 1 + 2 Σ_k ρ_k the integrated autocorrelation
+    of r, summed over lags k = 1 … ``max_lag`` (≈ one FWHM in points) and
+    truncated at the first ρ_k ≤ 0. This is the idea of Bérar & Lelann (J.
+    Appl. Cryst. 24, 1, 1991): residuals correlated over a peak width carry
+    fewer independent observations, N_eff = N/τ. τ ≥ 1 by construction.
+    """
+    r = np.asarray(r, float) - np.mean(r)
+    ss = float(np.sum(r * r))
+    if ss <= 0 or r.size < 4:
+        return 2.0, 1.0
+    dw = float(np.sum(np.diff(r) ** 2) / ss)
+    tau = 1.0
+    for k in range(1, max(int(max_lag), 1) + 1):
+        rho = float(np.sum(r[:-k] * r[k:])) / ss
+        if rho <= 0:
+            break
+        tau += 2.0 * rho
+    return dw, float(np.sqrt(tau))
 
 
 def _wl_tuple(wavelength) -> Tuple[float, Optional[float], float]:
@@ -332,7 +364,8 @@ def williamson_hall(peaks, wavelength=None, K: float = 0.9,
         return res
     X, Y = xw[ok], yw[ok]
     sw = yw_esd[ok]
-    w = 1.0 / sw ** 2 if np.all(np.isfinite(sw)) and np.all(sw > 0) else np.ones_like(Y)
+    weighted = bool(np.all(np.isfinite(sw)) and np.all(sw > 0))
+    w = 1.0 / sw ** 2 if weighted else np.ones_like(Y)
     A = np.vstack([np.ones_like(X), X]).T
     Aw = A * np.sqrt(w)[:, None]
     coef, *_ = np.linalg.lstsq(Aw, Y * np.sqrt(w), rcond=None)
@@ -345,7 +378,13 @@ def williamson_hall(peaks, wavelength=None, K: float = 0.9,
     ss_tot = float(np.sum((Y - Y.mean()) ** 2)) or 1.0
     res.update({"intercept": c0, "intercept_esd": sc0, "slope": c1,
                 "slope_esd": sc1, "strain": c1, "strain_esd": sc1,
-                "r2": 1.0 - float(np.sum(r * r)) / ss_tot})
+                "r2": 1.0 - float(np.sum(r * r)) / ss_tot,
+                "chi2_red": s2 if weighted else np.nan, "consistent": True})
+    # R² is not a validity test: a pure-size sample has slope ≈ 0 and R² ≈ 0.
+    # The test is whether the points scatter about the line by more than their
+    # FWHM esds, i.e. the broadening is not one isotropic size + strain.
+    if weighted and s2 > 10.0:
+        res["consistent"] = False
     if c0 > 0:
         D = K * wavelength / c0 / 10.0
         res["D_nm"] = D
@@ -355,6 +394,11 @@ def williamson_hall(peaks, wavelength=None, K: float = 0.9,
     else:
         res["note"] = ("intercept ≤ 0: size broadening below resolution or the "
                        "instrumental correction is too large")
+    if not res["consistent"]:
+        res["note"] = (res["note"] + "; " if res["note"] else "") + (
+            f"points scatter {np.sqrt(s2):.1f}× their esds about the line: the "
+            "broadening is not a single isotropic size + strain (anisotropic, "
+            "overlapping or split lines); D and ε are not meaningful")
     return res
 
 
@@ -479,7 +523,8 @@ def allowed_reflections(sg_symbol: str, cell, d_min: float):
     keep = np.zeros(len(H), bool)
     for seed in (np.array([0.1234, 0.3571, 0.6789]), np.array([0.4142, 0.0731, 0.2236])):
         X = np.einsum("nij,j->ni", R, seed) + T
-        F = np.exp(2j * np.pi * (H @ X.T)).sum(axis=1)
+        with _blas_quiet():
+            F = np.exp(2j * np.pi * (H @ X.T)).sum(axis=1)
         keep |= np.abs(F) > 1e-3 * len(ops)
     H = H[keep]
     Gg = _recip_metric(cell_g)
@@ -503,7 +548,7 @@ class PawleyResult:
     cell_esd: Tuple[float, ...]
     volume: float
     volume_esd: float
-    Z: int
+    Z: Optional[int]
     zero: float
     zero_esd: float
     displacement: float
@@ -530,14 +575,24 @@ class PawleyResult:
     correlations: Dict[str, float] = field(default_factory=dict)
     message: str = ""
     extra: List[Dict] = field(default_factory=list)
+    Rwp_net: float = float("nan")      # Rwp of the background-subtracted pattern
+    durbin_watson: float = float("nan")
+    esd_scale: float = 1.0             # correlated-residual inflation applied to esds
+    n_eff: float = float("nan")        # N/τ
+    bic_eff: float = float("nan")      # BIC with N_eff
+    bic_null_eff: float = float("nan")  # background-only model, same N_eff
+    cell_sys: Tuple[float, ...] = ()   # |Δcell| zero-only vs displacement-only
+    volume_sys: float = float("nan")
+    status: str = STATUS_OK
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def volume_per_fu(self) -> float:
-        return self.volume / self.Z
+        return self.volume / self.Z if self.Z else float("nan")
 
     @property
     def volume_per_fu_esd(self) -> float:
-        return self.volume_esd / self.Z
+        return self.volume_esd / self.Z if self.Z else float("nan")
 
     @property
     def a_pc(self) -> float:
@@ -556,10 +611,54 @@ class PawleyResult:
             "a_pc (Å)": self.a_pc if self.model in PEROVSKITE_MODELS else float("nan"),
             "zero (°)": self.zero, "σzero": self.zero_esd,
             "displ. (°)": self.displacement, "σdispl.": self.displacement_esd,
-            "Rwp (%)": 100 * self.Rwp, "Rp (%)": 100 * self.Rp,
-            "Rexp (%)": 100 * self.Rexp, "GoF": self.gof,
-            "N_par": self.n_par, "BIC": self.bic,
+            "Rwp (%)": 100 * self.Rwp, "Rwp net (%)": 100 * self.Rwp_net,
+            "Rp (%)": 100 * self.Rp, "Rexp (%)": 100 * self.Rexp, "GoF": self.gof,
+            "DW": self.durbin_watson, "esd ×": self.esd_scale,
+            "N_par": self.n_par, "BIC": self.bic, "BIC_eff": self.bic_eff,
+            "status": self.status,
         }
+
+    def profile_frame(self):
+        """Observed, calculated, background and difference per point."""
+        import pandas as pd
+        return pd.DataFrame({"two_theta": self.x, "y_obs": self.y_obs,
+                             "y_calc": self.y_calc, "y_bkg": self.y_bkg,
+                             "diff": self.y_obs - self.y_calc})
+
+    def reflections_frame(self):
+        """Kα1 reflection positions, hkl and Pawley (integrated) intensities."""
+        import pandas as pd
+        h = np.asarray(self.hkl).reshape(-1, 3) if len(self.hkl) else np.zeros((0, 3))
+        n = min(len(self.ticks), len(h))
+        return pd.DataFrame({"two_theta": np.asarray(self.ticks)[:n],
+                             "h": h[:n, 0], "k": h[:n, 1], "l": h[:n, 2],
+                             "intensity": np.asarray(self.intensities)[:n]})
+
+    def to_dict(self, provenance: Optional[Dict] = None) -> Dict:
+        """JSON-safe summary: the table row, cell systematics, notes and the
+        provenance (input file hash, wavelength, range, version) given."""
+        def clean(v):
+            if isinstance(v, (np.floating, float)):
+                return float(v) if np.isfinite(v) else None
+            if isinstance(v, np.integer):
+                return int(v)
+            if isinstance(v, (list, tuple, np.ndarray)):
+                return [clean(u) for u in v]
+            if isinstance(v, dict):
+                return {str(k): clean(u) for k, u in v.items()}
+            return v
+        from xrdkit import __version__
+        return clean({"schema": "xrdkit.pawley/1", "xrdkit_version": __version__,
+                      **(provenance or {}), **self.as_row(),
+                      "cell": self.cell, "cell_esd": self.cell_esd,
+                      "cell_sys": self.cell_sys, "volume_sys": self.volume_sys,
+                      "n_obs": self.n_obs, "n_eff": self.n_eff,
+                      "bic_null_eff": self.bic_null_eff, "U": self.U, "V": self.V,
+                      "W": self.W, "eta": self.eta, "message": self.message,
+                      "warnings": list(self.warnings),
+                      "correlations": self.correlations,
+                      "extra_phases": [{k: e[k] for k in e if k not in ("ticks", "hkl")}
+                                       for e in self.extra]})
 
 
 class _PawleyModel:
@@ -587,6 +686,7 @@ class _PawleyModel:
         self.free_names = _lattice_free(self.system, self.rhombo)
         self.wl1, self.wl2, self.ratio = wl1, wl2, ratio
         self.refine_zero, self.refine_disp = refine_zero, refine_disp
+        self.zero_fixed = 0.0
         lam_max = wl2 if wl2 else wl1
         tt_max = min(x.max() + 2.0, 179.0)
         self.d_min = lam_max / (2.0 * np.sin(np.radians(0.5 * tt_max)))
@@ -630,7 +730,7 @@ class _PawleyModel:
         d = dict(zip(self.names, p))
         free = [d[k] for k in self.free_names]
         cell = _cell_from_free(self.system, self.rhombo, free, self.base)
-        return (cell, d.get("zero", 0.0), d.get("disp", 0.0),
+        return (cell, d.get("zero", self.zero_fixed), d.get("disp", 0.0),
                 d["U"], d["V"], d["W"], d["eta"])
 
     def extra_cells(self, p):
@@ -701,16 +801,27 @@ class _PawleyModel:
         A, sel, tt1 = self.design(p)
         b = self.y * self.sw
         M = A * self.sw[:, None]
-        Mp = M - self.Qb @ (self.Qb.T @ M)
-        bp = b - self.Qb @ (self.Qb.T @ b)
-        if M.shape[1]:
-            Q, R = np.linalg.qr(Mp)
-            I, _ = nnls(R, Q.T @ bp, maxiter=50 * max(M.shape[1], 1))
-        else:
-            I = np.zeros(0)
-        cb = np.linalg.solve(self.Rb, self.Qb.T @ (b - M @ I))
-        bkg = self.B @ cb
-        return A @ I + bkg, bkg, I, sel, tt1
+        with _blas_quiet():
+            Mp = M - self.Qb @ (self.Qb.T @ M)
+            bp = b - self.Qb @ (self.Qb.T @ b)
+            if M.shape[1]:
+                Q, R = np.linalg.qr(Mp)
+                I, _ = nnls(R, Q.T @ bp, maxiter=50 * max(M.shape[1], 1))
+            else:
+                I = np.zeros(0)
+            cb = np.linalg.solve(self.Rb, self.Qb.T @ (b - M @ I))
+            bkg = self.B @ cb
+            yc = A @ I + bkg
+        if not np.all(np.isfinite(yc)):
+            raise FloatingPointError("non-finite calculated pattern")
+        return yc, bkg, I, sel, tt1
+
+    def chi2_null(self):
+        """Weighted χ² of the background-only model (no reflections)."""
+        b = self.y * self.sw
+        with _blas_quiet():
+            r = b - self.Qb @ (self.Qb.T @ b)
+        return float(np.sum(r * r))
 
     def residual(self, p):
         yc, *_ = self.solve_linear(p)
@@ -766,7 +877,8 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
                   n_bkg: int = 8, refine_zero: bool = False,
                   refine_disp: bool = True, fwhm0: Optional[float] = None,
                   multistart: bool = True, weighting: str = "auto",
-                  extra_phases: Sequence = ()) -> PawleyResult:
+                  extra_phases: Sequence = (), zero_fixed: float = 0.0,
+                  check_systematics: bool = True) -> PawleyResult:
     """Pawley fit of one measured pattern with one space-group model.
 
     ``model`` is a key of :data:`PEROVSKITE_MODELS` (then ``a_pc`` sets the
@@ -776,13 +888,23 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
 
     Zero offset and sample displacement are both nearly constant over a
     20–80° scan (cosθ changes by ~20 %), so refining both at once is
-    ill-conditioned; the default refines displacement only. Lower symmetry
+    ill-conditioned; the default refines displacement only. Which of the two
+    is refined shifts the cell by more than its statistical esd, so with
+    ``check_systematics`` the fit is repeated with the other one and the
+    difference is reported as ``cell_sys`` / ``volume_sys``. If the zero is
+    known from a standard (Si, LaB6) pass it as ``zero_fixed`` (°); the check
+    is then skipped. A Measured with ``info["kalpha2_stripped"]`` is fitted
+    with Kα1 only. Lower symmetry
     always fits at least as well; compare models with :func:`compare_models`
     (BIC) and by which pseudocubic reflections are split.
 
     ``weighting`` is passed to :func:`counting_weights`. BIC is computed in
     its unknown-variance form N·ln(χ²/N) + P·ln N, which does not depend on
-    the absolute intensity scale or on a wrong noise model.
+    the absolute intensity scale or on a wrong noise model; ``bic_eff`` uses
+    N_eff = N/τ for serially correlated residuals and is the one to compare.
+    ``bic_null_eff`` is the background-only model on the same data: a fit
+    that does not beat it by ΔBIC > 10 has status ``"unexplained"`` (no
+    signal, or a cell that does not index the peaks).
 
     ``extra_phases`` are secondary phases refined jointly (Pawley intensities,
     own lattice constants, own FWHM scale on the shared Caglioti profile):
@@ -793,6 +915,10 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
     from scipy.optimize import least_squares
 
     wl1, wl2, ratio = _wl_tuple(wavelength)
+    notes: List[str] = []
+    if (m.info or {}).get("kalpha2_stripped") and wl2:
+        wl2, ratio = None, 0.0
+        notes.append("input is Kα2-stripped: fitted with Kα1 only")
     x, y = _crop(m, tt_range)
     if fwhm0 is None:
         fwhm0 = _median_fwhm(x, y)
@@ -808,13 +934,13 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
         sg_symbol = model
         if cell0 is None:
             raise ValueError("cell0 is required for a custom space group")
-        Z = Z or 1
     cell0 = tuple(float(v) for v in cell0)
-    Z = int(Z)
+    Z = int(Z) if Z else None  # unknown Z → V/Z is not reported
 
     extra = [phase_spec(e) for e in extra_phases]
     pm = _PawleyModel(x, y, sg_symbol, cell0, wl1, wl2, ratio, n_bkg,
                       refine_zero, refine_disp, weighting, extra)
+    pm.zero_fixed = float(zero_fixed)
     base_free = [dict(zip(["a", "b", "c", "alpha", "beta", "gamma"], cell0))[k]
                  for k in pm.free_names]
 
@@ -944,11 +1070,20 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
     n_par = len(p) + n_lin_active
     dof = max(n_obs - n_par, 1)
     Rwp = float(np.sqrt(chi2 / np.sum(w * y * y)))
+    Rwp_net = float(np.sqrt(chi2 / max(np.sum(w * (y - bkg) ** 2), 1e-300)))
     Rp = float(np.sum(np.abs(r)) / np.sum(np.abs(y)))
     Rexp = float(np.sqrt(dof / np.sum(w * y * y)))
+
+    # serial correlation over ~one FWHM → esd inflation and N_eff
+    step = float(np.median(np.diff(x))) if x.size > 1 else fwhm0
+    fw_mean = float(np.mean(caglioti_fwhm(tt1, *pm.unpack(p)[3:6]))) if tt1.size else fwhm0
+    dw, esd_scale = _serial_correlation(pm.sw * r, int(np.ceil(fw_mean / max(step, 1e-9))))
+    n_eff = n_obs / esd_scale ** 2
+
     J = sol.jac
     try:
-        cov = np.linalg.pinv(J.T @ J) * (chi2 / dof)
+        with _blas_quiet():
+            cov = np.linalg.pinv(J.T @ J) * (chi2 / dof) * esd_scale ** 2
     except np.linalg.LinAlgError:
         cov = np.full((len(p), len(p)), np.nan)
     esd = np.sqrt(np.clip(np.diag(cov), 0.0, None))
@@ -993,10 +1128,66 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
 
     corr = {}
     sd = np.where(esd > 0, esd, np.nan)
-    Cn = cov / np.outer(sd, sd)
+    with _blas_quiet():
+        Cn = cov / np.outer(sd, sd)
     for i, j in combinations(range(len(p)), 2):
         if np.isfinite(Cn[i, j]) and abs(Cn[i, j]) > 0.8:
             corr[f"{pm.names[i]}–{pm.names[j]}"] = float(Cn[i, j])
+
+    # zero-only vs displacement-only: systematic part of the cell error
+    cell_sys, V_sys = (), float("nan")
+    if check_systematics and refine_zero != refine_disp and zero_fixed == 0.0:
+        import copy
+        alt = copy.copy(pm)
+        alt.names = ["zero" if k == "disp" else "disp" if k == "zero" else k
+                     for k in pm.names]
+        i0 = pm.names.index("disp" if refine_disp else "zero")
+        cth = float(np.mean(np.cos(np.radians(0.5 * x))))
+        p2 = p.copy()
+        p2[i0] = p[i0] * cth if refine_disp else p[i0] / cth
+        p2 = np.clip(p2, lo, hi)
+        try:
+            s2 = least_squares(alt.residual, p2, bounds=(lo, hi), x_scale="jac",
+                               max_nfev=100, diff_step=1e-6)
+            c2 = alt.unpack(s2.x)[0]
+            cell_sys = tuple(float(abs(u - v)) for u, v in zip(c2, cell))
+            V_sys = float(abs(cell_volume(c2) - cell_volume(cell)))
+        except (FloatingPointError, ValueError, np.linalg.LinAlgError):
+            pass
+
+    # parameters stuck at a bound (η ∈ {0, 1} and U = 0 are legitimate limits)
+    for k, v, a_, b_ in zip(pm.names, p, lo, hi):
+        if k in ("eta", "U"):
+            continue
+        if min(v - a_, b_ - v) < 1e-3 * (b_ - a_):
+            notes.append(f"{k} = {v:.5g} is at its bound [{a_:.5g}, {b_:.5g}]: "
+                         "the fit is constrained there, its esd is meaningless")
+    _prof = ("U", "V", "W", "eta")
+    for (i, j) in combinations(range(len(p)), 2):
+        k = f"{pm.names[i]}–{pm.names[j]}"
+        c = corr.get(k, 0.0)
+        if abs(c) > 0.95 and not (pm.names[i] in _prof and pm.names[j] in _prof):
+            notes.append(f"{k} correlation {c:+.2f}: these are not separately determined")
+
+    bic = n_obs * np.log(chi2 / n_obs) + n_par * np.log(n_obs)
+    bic_eff = n_eff * np.log(chi2 / n_obs) + n_par * np.log(n_eff)
+    chi2_0 = pm.chi2_null()
+    bic_null_eff = n_eff * np.log(chi2_0 / n_obs) + pm.B.shape[1] * np.log(n_eff)
+    gof = Rwp / Rexp if Rexp else np.nan
+    status = STATUS_OK
+    if not bic_eff < bic_null_eff - 10.0:
+        status = STATUS_UNEXPLAINED
+        notes.append(f"this model's reflections do not explain the pattern: "
+                     f"BIC_eff − BIC_null = {bic_eff - bic_null_eff:+.1f} (needs "
+                     "< −10 against a background-only fit). Either there is no "
+                     "diffraction signal or this cell does not index the peaks")
+    elif gof > 3:
+        status = STATUS_POOR
+        notes.append(f"GoF = {gof:.1f} > 3 — misfit (wrong cell, missing phase or "
+                     "false minimum); check the difference curve")
+    if esd_scale > 1.5:
+        notes.append(f"residuals serially correlated (Durbin–Watson {dw:.2f}): "
+                     f"esds inflated ×{esd_scale:.1f}")
 
     return PawleyResult(
         model=model, spacegroup=pm.sg.symbol, crystal_system=pm.system,
@@ -1005,16 +1196,15 @@ def pawley_refine(m: Measured, model: str = "R-3c", a_pc: Optional[float] = None
         zero=float(zero), zero_esd=_esd("zero"),
         displacement=float(disp), displacement_esd=_esd("disp"),
         U=float(U), V=float(V), W=float(W), eta=float(eta),
-        Rwp=Rwp, Rp=Rp, Rexp=Rexp, gof=Rwp / Rexp if Rexp else np.nan,
-        chi2=chi2, n_obs=n_obs, n_par=n_par,
-        bic=n_obs * np.log(chi2 / n_obs) + n_par * np.log(n_obs),
+        Rwp=Rwp, Rp=Rp, Rexp=Rexp, gof=gof,
+        chi2=chi2, n_obs=n_obs, n_par=n_par, bic=float(bic),
         x=x, y_obs=y, y_calc=yc, y_bkg=bkg, ticks=tt1,
         hkl=pm.hkl[sel], intensities=I[:int(np.sum(sel))], correlations=corr,
         extra=extra_out,
-        message=f"{sol.message} [{pm.weighting} weights]" + (
-            f" WARNING: GoF = {Rwp / Rexp:.1f} > 3 — misfit (wrong cell, missing "
-            "phase or false minimum); check the difference curve"
-            if Rexp and Rwp / Rexp > 3 else ""),
+        message=f"{sol.message} [{pm.weighting} weights]",
+        Rwp_net=Rwp_net, durbin_watson=dw, esd_scale=esd_scale, n_eff=n_eff,
+        bic_eff=float(bic_eff), bic_null_eff=float(bic_null_eff),
+        cell_sys=cell_sys, volume_sys=V_sys, status=status, warnings=notes,
     )
 
 
@@ -1029,6 +1219,33 @@ def _median_fwhm(x, y) -> float:
     return float(np.clip(np.median(pr["widths"]) * step, 2 * step, 3.0))
 
 
+def _pc_index(m: Measured, a_pc: float, wl1: float, tt_range, tol: float):
+    """(indexed, mixed) fractions of the net intensity of the 8 strongest
+    peaks: indexed by a primitive cubic cell ``a_pc``, and indexed only by
+    mixed-parity pseudocubic hkl (100, 110, 210, …)."""
+    from scipy.signal import find_peaks
+    x, y = _crop(m, tt_range)
+    net = y - estimate_background(x, y)
+    idx, pr = find_peaks(net, prominence=5 * _robust_noise(net))
+    if idx.size == 0:
+        return 0.0, 0.0
+    top = idx[np.argsort(pr["prominences"])[::-1][:8]]
+    d = wl1 / (2 * np.sin(np.radians(x[top] / 2)))
+    hkl = np.array([(h, k, l) for h in range(5) for k in range(h + 1)
+                    for l in range(k + 1) if h + k + l > 0])
+    d_pc = a_pc / np.sqrt((hkl ** 2).sum(1))
+    mixed_hkl = (hkl % 2).sum(1) % 3 != 0  # not all-even / all-odd
+    ok = np.zeros(len(d), bool)
+    mixed = np.zeros(len(d), bool)
+    for i, di in enumerate(d):
+        hit = np.abs(d_pc / di - 1) <= tol
+        ok[i] = hit.any()
+        mixed[i] = hit.any() and mixed_hkl[hit].all()
+    w = net[top]
+    tot = max(w.sum(), 1e-12)
+    return float(w[ok].sum() / tot), float(w[mixed].sum() / tot)
+
+
 def perovskite_check(m: Measured, a_pc: float, wl1: float = 1.54056, tt_range=None,
                      tol: float = 0.015) -> float:
     """Fraction of the net intensity of the 8 strongest peaks that a primitive
@@ -1036,21 +1253,23 @@ def perovskite_check(m: Measured, a_pc: float, wl1: float = 1.54056, tt_range=No
     wide enough for split pseudocubic lines). A single-phase perovskite gives
     ≈ 1; values well below ~0.7 mean the pattern is not (only) a perovskite
     and the tilt-model comparison is meaningless.
+
+    A face-centred pattern (fcc metal, rock salt, fluorite) also scores 1,
+    because its lines are a subset of primitive cubic; see
+    :func:`perovskite_mixed_fraction`.
     """
-    from scipy.signal import find_peaks
-    x, y = _crop(m, tt_range)
-    net = y - estimate_background(x, y)
-    idx, pr = find_peaks(net, prominence=5 * _robust_noise(net))
-    if idx.size == 0:
-        return 0.0
-    top = idx[np.argsort(pr["prominences"])[::-1][:8]]
-    d = wl1 / (2 * np.sin(np.radians(x[top] / 2)))
-    hkl = np.array([(h, k, l) for h in range(5) for k in range(h + 1)
-                    for l in range(k + 1) if h + k + l > 0])
-    d_pc = a_pc / np.sqrt((hkl ** 2).sum(1))
-    ok = np.array([np.min(np.abs(d_pc / di - 1)) <= tol for di in d])
-    w = net[top]
-    return float(w[ok].sum() / max(w.sum(), 1e-12))
+    return _pc_index(m, a_pc, wl1, tt_range, tol)[0]
+
+
+def perovskite_mixed_fraction(m: Measured, a_pc: float, wl1: float = 1.54056,
+                              tt_range=None, tol: float = 0.015) -> float:
+    """Share of the strongest-peak intensity on mixed-parity pseudocubic hkl.
+
+    In an ABO3 perovskite the pseudocubic 110 (F ≈ f_A + f_B − f_O) is the
+    strongest line, so this share is large; a face-centred lattice has no
+    mixed-parity reflections and gives ≈ 0.
+    """
+    return _pc_index(m, a_pc, wl1, tt_range, tol)[1]
 
 
 def estimate_a_pc(m: Measured, wl1: float = 1.54056, tt_range=None) -> float:
@@ -1092,11 +1311,15 @@ def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
     a spec dict {"name", "spacegroup", "cell", "Z"} (see :func:`phase_spec`),
     so candidate structures of any material can be compared.
 
-    ΔBIC > 10 relative to the best model is conventionally strong evidence
-    against it (Kass & Raftery, JASA 90, 773, 1995). Pawley fits cannot see
-    weak superstructure (octahedral-tilt) reflections at lab-XRD
-    signal-to-noise, so space groups that share the same metric distortion —
-    e.g. R-3c vs R-3, Pnma vs Pbnm settings — are not distinguishable here.
+    Models are ranked by BIC with a common effective number of observations
+    N_eff = N/τ, τ taken from the best (lowest χ²) fit, because serially
+    correlated residuals make the nominal N overstate the evidence. ΔBIC > 10
+    is conventionally strong evidence against a model (Kass & Raftery, JASA
+    90, 773, 1995). Pnma and Pbnm are one space group (No. 62) in two axis
+    settings, not two candidates. Groups that differ only by weak
+    superstructure (octahedral-tilt or cation-order) reflections — e.g. R-3
+    vs R-3c — are usually not distinguishable from lab-XRD intensities even
+    though their reflection lists differ.
     """
     import pandas as pd
     a_pc = kwargs.pop("a_pc", None)
@@ -1106,10 +1329,10 @@ def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
                             for md in models):
         wl1 = _wl_tuple(kwargs.get("wavelength", 1.54056))[0]
         a_pc = estimate_a_pc(m, wl1, kwargs.get("tt_range"))
-    pc_frac = None
+    pc_frac = mixed_frac = None
     if a_pc is not None:
         wl1 = _wl_tuple(kwargs.get("wavelength", 1.54056))[0]
-        pc_frac = perovskite_check(m, a_pc, wl1, kwargs.get("tt_range"))
+        pc_frac, mixed_frac = _pc_index(m, a_pc, wl1, kwargs.get("tt_range"), 0.015)
     def one(md):
         name = md if isinstance(md, str) else None
         try:
@@ -1138,15 +1361,38 @@ def compare_models(m: Measured, models: Sequence = ("Pm-3m", "R-3c", "Pnma"),
         else:
             rows.append(r.as_row())
     df = pd.DataFrame(rows)
-    if "BIC" in df:
+    ok = [r for r in results if not isinstance(r, Exception)]
+    if ok:
+        ref = min(ok, key=lambda r: r.chi2)
+        n_eff = ref.n_eff
+        bmap = {}
+        for md, r in zip(names, results):
+            if not isinstance(r, Exception):
+                r.bic_eff = float(n_eff * np.log(r.chi2 / r.n_obs) + r.n_par * np.log(n_eff))
+                bmap[r.model if r.model else md] = r.bic_eff
+        df["BIC_eff"] = [bmap.get(md, np.nan) for md in df["model"]]
         df["ΔBIC"] = df["BIC"] - df["BIC"].min()
-        df = df.sort_values("BIC").reset_index(drop=True)
+        df["ΔBIC_eff"] = df["BIC_eff"] - df["BIC_eff"].min()
+        df = df.sort_values("BIC_eff").reset_index(drop=True)
+        df.attrs["n_eff"] = n_eff
+    if "status" in df and (df["status"] == STATUS_UNEXPLAINED).all():
+        df.attrs["warning"] = ("no model beats a background-only fit (ΔBIC_eff > −10): "
+                               "none of these cells indexes the observed peaks (or "
+                               "there is no signal); the ranking is not meaningful")
     if "Rwp (%)" in df and np.isfinite(df["Rwp (%)"].iloc[0]) and df["Rwp (%)"].iloc[0] > 20:
-        df.attrs["warning"] = (
+        df.attrs["warning"] = (df.attrs.get("warning", "") and df.attrs["warning"] + ". ") + (
             f"best candidate fits with Rwp = {df['Rwp (%)'].iloc[0]:.0f} %: none of the "
             "candidates describes this pattern; add the right phase(s)")
     if pc_frac is not None:
         df.attrs["perovskite_fraction"] = pc_frac
+        df.attrs["perovskite_mixed_fraction"] = mixed_frac
+        if pc_frac >= 0.7 and mixed_frac < 0.1:
+            df.attrs["warning"] = (df.attrs.get("warning", "") and df.attrs["warning"] + ". ") + (
+                f"the strong lines index as a face-centred cubic cell (a = {a_pc:.3f} Å): "
+                f"only {100 * mixed_frac:.0f} % of their intensity is on mixed-parity "
+                "pseudocubic hkl, but the 110 must be the strongest perovskite line. "
+                "This looks like an fcc metal / rock-salt / fluorite phase, not a "
+                "perovskite; the tilt-model ranking is not meaningful.")
         if pc_frac < 0.7:
             df.attrs["warning"] = (df.attrs.get("warning", "") and df.attrs["warning"] + ". ") + (
                 f"only {100 * pc_frac:.0f} % of the strongest-peak intensity is indexed "
@@ -1217,8 +1463,13 @@ def make_wh_plot(wh: Dict, figsize=(3.6, 2.8)):
     ax.set_xlabel(r"4 sin$\theta$")
     ax.set_ylabel(r"$\beta$ cos$\theta$ (10$^{-3}$ rad)")
     D, e = wh.get("D_nm", np.nan), wh.get("strain", np.nan)
-    ax.set_title(f"D = {D:.1f} nm, ε = {e * 100:.3f} %" if np.isfinite(D)
-                 else f"ε = {e * 100:.3f} % (D undetermined)", fontsize=8)
+    if not wh.get("consistent", True):
+        title = "not a single size + strain (χ²_red > 10)"
+    elif np.isfinite(D):
+        title = f"D = {D:.1f} nm, ε = {e * 100:.3f} %"
+    else:
+        title = f"ε = {e * 100:.3f} % (D undetermined)"
+    ax.set_title(title, fontsize=8)
     fig.tight_layout()
     return fig
 
@@ -1407,6 +1658,25 @@ def _best_scale_score(tt, I, wl, target_tt, target_h, observed_tt, tol, max_stra
     return best
 
 
+_GAS_ELEMENTS = {"H", "N", "O", "F", "Cl", "He", "Ne", "Ar", "Kr", "Xe"}
+
+
+def _plausible_formula(formula: str, max_atoms: int = 100) -> bool:
+    """False for entries that cannot be a phase in an oxide/alloy sample:
+    solid molecular gases (O₂, N₂, …) and reduced formulas with more than
+    ``max_atoms`` atoms (molecular/organic crystals). Partial-occupancy
+    solid solutions (La₀.₆Sr₀.₄MnO₃) are kept."""
+    from pymatgen.core import Composition
+    try:
+        c = Composition(formula).reduced_composition
+    except Exception:
+        return False
+    els = {str(e) for e in c.elements}
+    if len(els) == 1 and els <= _GAS_ELEMENTS:
+        return False
+    return float(sum(c.values())) <= max_atoms
+
+
 def match_cod(target_peaks, all_peaks, elements: Sequence[str],
               wavelength: float = 1.54056, tt_range=(20.0, 80.0),
               tol: float = 0.15, max_subset: int = 3, prefilter_keep: int = 30,
@@ -1427,6 +1697,8 @@ def match_cod(target_peaks, all_peaks, elements: Sequence[str],
        over an isotropic lattice scale within ±``max_strain`` (solid
        solutions, DFT over-binding); the scale is reported.
 
+    Molecular-gas solids and very large reduced formulas are dropped
+    (:func:`_plausible_formula`).
     A high score is a hypothesis to check by overlay, not an identification:
     one or two unassigned peaks are explained by many phases.
     Returns a DataFrame sorted by score; ``df.attrs["errors"]`` lists failed
@@ -1474,7 +1746,7 @@ def match_cod(target_peaks, all_peaks, elements: Sequence[str],
                 rb = best[key]["R"] if key in best and best[key]["R"] is not None else 1.0
                 if key not in best or r < rb:
                     best[key] = e
-            cands = list(best.values())
+            cands = [e for e in best.values() if _plausible_formula(e["formula"])]
             if progress:
                 progress(f"COD: {len(hits)} entries, {len(cands)} distinct "
                          "formula/space group")
@@ -1511,6 +1783,8 @@ def match_cod(target_peaks, all_peaks, elements: Sequence[str],
         from pymatgen.analysis.diffraction.xrd import XRDCalculator
         calc = XRDCalculator(wavelength=wl1)
         for e in hits:
+            if not _plausible_formula(e["formula"]):
+                continue
             try:
                 pat = calc.get_pattern(e["structure"], two_theta_range=(
                     max(tt_range[0] - 3, 1.0), min(tt_range[1] + 3, 179.0)))
