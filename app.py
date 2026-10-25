@@ -848,8 +848,11 @@ elif an_by:
                            "microstrain model cannot produce (over-corrected "
                            "instrument function, or overlapping low-angle lines).")
             if inst is None:
-                wr.warning("No instrumental correction: D is a lower bound and ε an "
-                           "upper bound.")
+                wr.warning("No instrumental correction: the instrument width adds to "
+                           "every peak, so D is underestimated (a lower bound). ε is "
+                           "biased by however the instrument width changes with angle, "
+                           "in either direction. Measure LaB₆ or Si on the same "
+                           "instrument and enter its U, V, W.")
         else:
             st.info("Select at least three peaks.")
 
