@@ -1749,6 +1749,8 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
             chance = float(np.mean(np.min(np.abs(grid[:, None] - observed_tt[None, :]),
                                           axis=1) <= tol)) if observed_tt.size else 0.0
             by_expl, by_prec = [], []
+            scales = np.linspace(1 - max_strain, 1 + max_strain,
+                                 int(2 * max_strain / 0.001) + 1) if max_strain > 0 else [1.0]
             for i, e in enumerate(cands):
                 tt = _candidate_positions(e, wl1, tt_range)
                 if tt is None:
@@ -1764,13 +1766,22 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
                                        observed_tt, tol, max_strain)
                 by_expl.append((sc[0], i))
                 if tt.size and observed_tt.size:
-                    t2, ok = _rescale_tt(tt, wl1, sc[4])
-                    hit = np.min(np.abs(t2[ok][:, None] - observed_tt[None, :]),
-                                 axis=1) <= tol
-                    if hit.sum() >= 2:
+                    # precision at the scale that puts most of the candidate's
+                    # own lines on observed peaks: the scale that explains
+                    # most height can move a minor phase's lines onto the
+                    # main phase's peaks
+                    prec = -1.0
+                    for s_ in scales:
+                        t2, ok = _rescale_tt(tt, wl1, s_)
+                        if not ok.any():
+                            continue
+                        hit = np.min(np.abs(t2[ok][:, None] - observed_tt[None, :]),
+                                     axis=1) <= tol
+                        if hit.sum() >= 2:
+                            prec = max(prec, float(hit.mean()))
+                    if prec >= 0:
                         # precision in excess of chance coincidence
-                        by_prec.append(((float(hit.mean()) - chance)
-                                        / max(1.0 - chance, 1e-6), i))
+                        by_prec.append(((prec - chance) / max(1.0 - chance, 1e-6), i))
             # rank compounds, not cells: per formula + space group only the
             # cell that best matches the observed peaks competes, so that
             # many temperature / pressure entries of one compound do not
@@ -2410,12 +2421,16 @@ def identify_phases(m: Measured, elements: Sequence[str] = (),
             sc, ex_, co, matched, free = _cell_gate(
                 L, wl1, t_tt, t_h, obs_tt, tol, max_strain)
             if len(matched) >= min_new_peaks and co >= min_consistency:
-                scored.append((sc, ex_, co, len(matched), free, r))
+                scored.append((sc, ex_, co, tuple(matched), free, r))
         scored.sort(key=lambda t: -t[0])
-        # one entry per formula + space group (COD often lists many)
+        # one entry per compound: same elements, space group and matched
+        # peaks (COD lists many entries and non-stoichiometric variants,
+        # e.g. MnO, Mn0.94O, Mn0.98O, which would fill all top_k slots)
         seen, short = set(), []
         for t in scored:
-            key = (t[5]["formula"], t[5]["spacegroup"])
+            els_ = frozenset(str(e) for e in t[5]["structure"].composition.elements) \
+                if t[5].get("structure") is not None else t[5]["formula"]
+            key = (els_, t[5]["spacegroup"], tuple(np.round(sorted(t[3]), 2)))
             if key not in seen:
                 seen.add(key)
                 short.append(t)
@@ -2429,7 +2444,8 @@ def identify_phases(m: Measured, elements: Sequence[str] = (),
             steps.append(rec)
             break
         trials = []
-        for sc, ex_, co, nm, free, r in short:
+        for sc, ex_, co, mt, free, r in short:
+            nm = len(mt)
             name = f"{r['formula']} {r['spacegroup']} ({r['id']})"
             say(f"step {step + 1}: testing {name}")
             L = struct_lines(r)
