@@ -142,7 +142,7 @@ A common workflow: relax your structure in VASP, drop the CONTCAR in, compare ag
 
 These rules are in `xrdkit/analysis.py` (`counting_weights`, `_serial_correlation`, `pawley_refine`, `compare_models`, `williamson_hall`).
 
-- **Weights.** `weighting="auto"` uses Poisson weights (σ² = y) only if the point-to-point noise matches √(background), which is true when the file holds raw counts. Data that were scaled, averaged, smoothed or offset get uniform weights, with σ estimated from the MAD of first differences. The weighting used is reported in `message`.
+- **Weights.** `weighting="auto"` computes the normalised first differences d_i = (y_{i+1} − y_i)/√(y_i + y_{i+1}). For raw counts their robust spread (MAD) is about 1 everywhere, peaks included. Poisson weights (σ² = y) are used if that spread is between 0.75 and 1.5 and no intensity is negative. Data that were scaled, averaged, smoothed or offset fail the test and get uniform weights, with σ from the MAD of the first differences. The weighting used is reported in `message`.
 - **Serial correlation.** Profile residuals are correlated over about one peak width, so the least-squares esds are too small. xrdkit reports:
   - the Durbin–Watson statistic d, which is about 2 for white residuals;
   - the integrated autocorrelation τ = 1 + 2 Σ_k ρ_k, summed over lags up to one mean FWHM and stopped at the first ρ_k ≤ 0;
@@ -162,7 +162,54 @@ These rules are in `xrdkit/analysis.py` (`counting_weights`, `_serial_correlatio
   - If the lines index but less than 10 % of their intensity is on mixed-parity pseudocubic hkl (where the perovskite 110 must be strongest), the pattern is flagged as fcc metal, rock-salt or fluorite, not perovskite.
 - **Williamson–Hall validity.** R² is not a validity test, because a pure-size sample has slope ≈ 0 and R² ≈ 0. With FWHM esds, the weighted reduced χ² of the line is computed. If χ²_red > 10, the points scatter far more than their esds, the broadening is not one isotropic size plus strain (anisotropic size or strain, stacking faults, overlapping phases), and D and ε are reported as not meaningful.
 
+## 10. Phase identification (`identify_phases`)
+
+1. **Peaks.** `find_peaks_table`, with Kα2 handled.
+2. **Candidates.** Every COD or Materials Project entry made only of the given elements. Each entry's lines are computed with pymatgen.
+   - Entries with more than 1000 distinct reflections in the range (large zeolite or defect cells) are skipped and listed in `errors`.
+   - A cheap prefilter ranks candidates by peak height explained and by chance-corrected line precision, (hit − c)/(1 − c). Here c is the fraction of the 2θ range that a random line would match within `tol`. Each formula + space group competes only with itself, so twenty copies of one compound cannot crowd out a minor phase.
+3. **Cell gate.** Each candidate's cell is first scaled isotropically. Its symmetry-free parameters are then fitted by least squares to the 2θ of the strong lines it is assigned:
+   - lengths within ±3 % of the database cell, angles within ±1°;
+   - the score is the fraction of unexplained height explained × the fraction of its own strong lines seen.
+
+   The anisotropic step is needed for solid solutions. Example: the LSMNi test pattern's Ruddlesden–Popper phase is +1.7 % in a against Sr0.8La1.2MnO3.94 and +1.9 % in c against La2NiO4.
+4. **Fixed-structure fit.** The best candidates are each fitted together with the phases already accepted. The model uses:
+   - intensities |F|²·Lp from the database atoms;
+   - one overall B per phase;
+   - a symmetry-tied cell;
+   - a per-phase width scale;
+   - Caglioti widths;
+   - scales ≥ 0 and a Chebyshev background (linear, NNLS).
+
+   A phase is accepted if BIC (common N_eff) drops by more than 10. Candidates within 10 of the winner are reported as indistinguishable alternatives.
+5. **Weight fractions.** Hill & Howard: W ∝ S·M_cell·V_cell. Final cells and esds come from a joint Pawley fit.
+
+**Audit (synthetic mixtures).**
+- Intensities agree with a brute-force structure-factor sum to 10⁻⁶.
+- Weight fractions are recovered within 0.25 wt %, including a 96/2/2 mixture.
+
+**Validation on measured data.** The data are not redistributed. All cases are Cu Kα1/Kα2.
+
+| Data | Expected | Found | Comment |
+|---|---|---|---|
+| IUCr CPD round robin 1g (Madsen et al. 2001) | corundum 31.37, fluorite 34.42, zincite 34.21 wt % | Al2O3 33.6, CaF2 36.4, ZnO 29.9 wt %; 31/31 peaks | wt % within 2–4 wt % (no preferred-orientation correction) |
+| IUCr CPD round robin 4 (Scarlett et al. 2002) | corundum 50.46, zircon 29.90, magnetite 19.64 wt % | Al2O3 73.9, ZrSiO4 21.2, Fe3O4 4.9 wt %; 41/41 peaks | phases correct. Sample 4 was designed to test microabsorption, which is not corrected, so magnetite is strongly underestimated |
+| Dara ZnO–TiO2 example | ≈ 60/40 | ZnO 60.2, anatase 39.8 wt % | anatase B at its lower bound |
+| LSMNi perovskite test pattern | — | K2NiF4-type (La2NiO4 Cmca: a 5.505, b 12.959, c 5.478 Å), La2O3 P-3m1, MnO (a 4.4457 Å); 21/21 peaks | The main phase is a substituted Ruddlesden–Popper (La,Sr)2(Mn,Ni)O4±δ indexed on the nearest database member. Its wt % uses La2NiO4 atoms, and B is at the bound for all three phases, so the wt % are rough. |
+
+**Limits.**
+- A structure absent from the database can be replaced by a related one that fits nearly as well.
+- Phases below about 1–3 wt % or amorphous phases are not found.
+- There is no preferred-orientation, microabsorption (Brindley) or monochromator-polarisation correction.
+- When B refines to its −0.5 Å² bound, the result says so.
+
 ## References
+
+- Hill, R. J. & Howard, C. J. Quantitative phase analysis from neutron powder diffraction data using the Rietveld method. *J. Appl. Cryst.* **20**, 467–474 (1987). doi:10.1107/S0021889887086199
+- Kass, R. E. & Raftery, A. E. Bayes factors. *J. Am. Stat. Assoc.* **90**, 773–795 (1995). doi:10.1080/01621459.1995.10476572
+- Madsen, I. C. et al. IUCr CPD round robin on QPA, sample 1. *J. Appl. Cryst.* **34**, 409–426 (2001). doi:10.1107/S0021889801007476
+- Scarlett, N. V. Y. et al. IUCr CPD round robin on QPA, samples 2, 3, 4…. *J. Appl. Cryst.* **35**, 383–400 (2002). doi:10.1107/S0021889802008798
+- Fei, Y., McDermott, M. J., Rom, C. L. et al. Dara: automated multiple-hypothesis phase identification and refinement from powder X-ray diffraction. *Chem. Mater.* **38**, 1364–1376 (2026). doi:10.1021/acs.chemmater.5c02820
 
 - Bérar, J.-F. & Lelann, P. E.s.d.'s and estimated probable error obtained in Rietveld refinements with local correlations. *J. Appl. Cryst.* **24**, 1–5 (1991). doi:10.1107/S0021889890008391
 

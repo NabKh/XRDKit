@@ -27,6 +27,21 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
+# A redeploy reruns this script in a live interpreter that still holds the
+# previously imported xrdkit modules; reload them when their source changed.
+import importlib
+import xrdkit.core
+import xrdkit.plot
+import xrdkit.db
+import xrdkit.analysis
+
+_XRDKIT_MODS = (xrdkit.core, xrdkit.plot, xrdkit.db, xrdkit.analysis)  # dependency order
+_mtimes = tuple(os.path.getmtime(m_.__file__) for m_ in _XRDKIT_MODS)
+if getattr(xrdkit, "_loaded_mtimes", _mtimes) != _mtimes:
+    for m_ in _XRDKIT_MODS:
+        importlib.reload(m_)
+xrdkit._loaded_mtimes = _mtimes
+
 from xrdkit.core import WAVELENGTHS, WAVELENGTHS_KA12, NATURE_RC
 from xrdkit.db import (Phase, builtin_phases, from_structure_file, from_mp_id,
                         from_cod_id, search_mp, search_cod, assign_color)
@@ -565,8 +580,8 @@ elif an_by:
         return (name, hash(m_.two_theta.tobytes()), hash(m_.intensity.tobytes()),
                 an_wl, tt_lo, tt_hi)
 
-    (t_peaks, t_ka2, t_pawley, t_wh, t_zoom, t_match) = st.tabs([
-        "Peak table", "Kα2 stripping", "Cell refinement (Pawley)",
+    (t_ident, t_peaks, t_ka2, t_pawley, t_wh, t_zoom, t_match) = st.tabs([
+        "Identify phases", "Peak table", "Kα2 stripping", "Cell refinement (Pawley)",
         "Williamson–Hall", "Zoom panels", "Unassigned peaks → database"])
 
     def _peaks(name, snr):
@@ -576,6 +591,141 @@ elif an_by:
                 an_by[name], wavelength=an_wl, tt_range=(tt_lo, tt_hi),
                 min_snr=snr, kalpha2=an_wl[1] is not None)
         return st.session_state.peak_tables[key]
+
+    with t_ident:
+        st.markdown(
+            "**Start here.** Enter the elements in your sample. The tool finds the "
+            "peaks, takes every structure made of those elements from the "
+            "Crystallography Open Database (or Materials Project if COD is "
+            "unreachable), and adds phases one at a time: at each step the "
+            "candidates whose calculated lines best match the still-unexplained "
+            "peaks are refined together with the phases already found, and one is "
+            "kept only if the whole-pattern fit becomes clearly better "
+            "(ΔBIC < −10). Phases the final fit does not need are removed again. "
+            "Works for any material; nothing here assumes a perovskite.")
+        c = st.columns([2, 2, 1])
+        id_name = c[0].selectbox("Pattern", an_names, key="id_name")
+        id_els = c[1].text_input("Elements in the sample", key="id_els",
+                                 placeholder="e.g. La, Sr, Mn, Ni, O",
+                                 help="every element that can be in a crystalline "
+                                      "phase; a phase with an element not listed "
+                                      "cannot be found")
+        id_src = c[2].selectbox("Database", ["auto", "cod", "mp"], key="id_src",
+                                help="auto: COD, falling back to Materials Project")
+        with st.expander("Options"):
+            c = st.columns(4)
+            id_max = c[0].number_input("max phases", 1, 8, 4, key="id_max")
+            id_tol = c[1].number_input("peak match tolerance (°)", 0.05, 0.5, 0.15,
+                                       step=0.01, key="id_tol")
+            id_snr = c[2].number_input("min peak S/N", 2.0, 50.0, 5.0, step=1.0,
+                                       key="id_snr")
+            id_lib = c[3].checkbox("also try my reference phases", True, key="id_lib",
+                                   help="library / uploaded phases that have a "
+                                        "structure are added to the candidates")
+        id_list = [e for e in id_els.replace(" ", "").replace(";", ",").split(",") if e]
+        st.session_state.setdefault("phase_id", {})
+        id_key = (_sig(id_name), tuple(id_list), id_src, id_max, id_tol, id_snr, id_lib)
+        if st.button("Identify phases", key="id_run", type="primary",
+                     disabled=not id_list,
+                     help=None if id_list else "enter the elements first"):
+            extra_c = []
+            if id_lib:
+                for n_, p_ in {**LIB, **CUSTOM}.items():
+                    stc = p_.info.get("structure")
+                    if stc is not None and {str(e) for e in stc.composition.elements} <= set(id_list):
+                        extra_c.append({"id": n_, "structure": stc})
+            msg = st.empty()
+            with st.spinner("searching and refining (one to a few minutes)…"):
+                try:
+                    st.session_state.phase_id[id_key] = xa.identify_phases(
+                        an_by[id_name], id_list, wavelength=an_wl,
+                        tt_range=(tt_lo, tt_hi), candidates=extra_c, source=id_src,
+                        max_phases=int(id_max), tol=id_tol, min_snr=id_snr,
+                        progress=lambda t: msg.caption(t))
+                except Exception as e:
+                    st.error(f"Identification failed: {type(e).__name__}: {e}")
+            msg.empty()
+        pid = st.session_state.phase_id.get(id_key)
+        if pid is not None:
+            (st.success if len(pid.phases) and not len(pid.unexplained)
+             else st.info if len(pid.phases) else st.warning)(pid.summary)
+            if len(pid.phases):
+                show = pid.phases.copy()
+                for col in ("a (Å)", "b (Å)", "c (Å)", "V (Å³)"):
+                    show[col] = show[col].round(4)
+                for col in ("σa", "σb", "σc"):
+                    show[col] = show[col].map(lambda v: f"{v:.1e}")
+                for col in ("weight fraction (%)", "intensity share (%)"):
+                    show[col] = show[col].round(1)
+                show["B (Å²)"] = show["B (Å²)"].round(2)
+                show["ΔBIC when added"] = show["ΔBIC when added"].round(0)
+                st.dataframe(show, hide_index=True, use_container_width=True)
+                f = pid.fit
+                if f is None:
+                    st.warning("The free-intensity (Pawley) fit failed; cells, weight "
+                               "fractions and B above are from the fixed-structure fit "
+                               "only, without esds.")
+            if len(pid.phases) and pid.fit is not None:
+                ifig = xa.make_pawley_plot(f, figsize=(7.0, 4.2))
+                st.pyplot(ifig, use_container_width=True)
+                plt.close(ifig)
+                st.markdown(
+                    "**How to read the fit numbers.** "
+                    f"*Rwp* = {100 * f.Rwp:.1f} %: misfit relative to the total "
+                    "intensity (it looks small when the background is high). "
+                    f"*Rwp (net)* = {100 * f.Rwp_net:.1f} %: the same after removing "
+                    "the background — the honest measure of how well the peaks are "
+                    f"described. *GoF* = {f.gof:.2f}: 1 means the misfit is pure "
+                    "counting noise; 1–2 is typical of good lab data; above 3 "
+                    "something is missing (a phase, peak asymmetry, a wrong cell). "
+                    f"*Durbin–Watson* = {f.durbin_watson:.2f}: 2 means the residual "
+                    "is random noise; values near 0 mean neighbouring points are "
+                    "wrong together, i.e. a systematic misfit — the cell esds are "
+                    f"then multiplied by {f.esd_scale:.1f}. σ = 1σ statistical "
+                    "uncertainty only (no zero-shift or instrument error).")
+            if len(pid.phases):
+                if len(pid.unexplained):
+                    st.markdown("**Peaks no phase explains**")
+                    st.dataframe(pid.unexplained[["two_theta", "d", "height", "snr"]],
+                                 hide_index=True, use_container_width=True)
+                pick = st.multiselect("Add found phases as reference phases (for the "
+                                      "plot and the other tabs)",
+                                      pid.phases["database id"].tolist(), key="id_pick")
+                if st.button("Add", key="id_add", disabled=not pick):
+                    from xrdkit.db import _structure_phase
+                    for pid_ in pick:
+                        try:
+                            if pid_.startswith("COD "):
+                                ph = from_cod_id(pid_.split()[1])
+                            else:
+                                stc = pid.structures[pid_]
+                                sg = stc.get_space_group_info(symprec=0.01)
+                                ph = _structure_phase(
+                                    f"{stc.composition.reduced_formula} ({pid_})", stc,
+                                    "#444444", f"{pid_}",
+                                    {"formula": stc.composition.reduced_formula,
+                                     "spacegroup": sg[0], "spacegroup_number": sg[1]})
+                            ph.name = _unique(ph.name, {**LIB, **CUSTOM})
+                            ph.color = assign_color(USED)
+                            USED.append(ph.color)
+                            CUSTOM[ph.name] = ph
+                        except Exception as e:
+                            st.error(f"Could not load {pid_}: {type(e).__name__}: {e}")
+                    st.rerun()
+            with st.expander("What this result can and cannot tell you"):
+                for cv in pid.caveats:
+                    st.markdown(f"- {cv}")
+            with st.expander("Step-by-step decisions"):
+                for s_ in pid.steps:
+                    st.markdown(f"**Step {s_['step']}** — {s_['decision']}")
+                    if s_["tried"]:
+                        st.dataframe(pd.DataFrame(s_["tried"]), hide_index=True,
+                                     use_container_width=True)
+                st.caption(f"database used: {pid.source} · {len(pid.peaks)} peaks")
+                for e in pid.errors[:5]:
+                    st.caption(f"⚠ {e}")
+                if len(pid.errors) > 5:
+                    st.caption(f"… and {len(pid.errors) - 5} more")
 
     with t_peaks:
         c = st.columns([2, 1])

@@ -29,23 +29,44 @@ _NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 
 
 def _read_xrdml(p):
-    """PANalytical .xrdml → (two_theta, intensity)."""
+    """PANalytical .xrdml → (two_theta, intensity).
+
+    Uses the first scan's ``<positions axis="2Theta">`` (start/end or a
+    ``listPositions`` array); other axes (Omega, …) are ignored. Counts are
+    divided by nothing: ``<counts>`` or ``<intensities>`` as recorded."""
     import xml.etree.ElementTree as ET
     root = ET.parse(p).getroot()
+    dp = next((el for el in root.iter() if el.tag.split("}")[-1] == "dataPoints"), root)
     start = end = step = None
-    intensities = None
-    for el in root.iter():
+    listed = intensities = None
+    pos_any = None
+    for el in dp.iter():
         tag = el.tag.split("}")[-1]
-        if tag == "startPosition" and start is None:
-            start = float(el.text)
-        elif tag == "endPosition" and end is None:
-            end = float(el.text)
-        elif tag == "stepSize" and step is None:
+        if tag == "positions":
+            ax = (el.get("axis") or "").lower()
+            if ax in ("2theta", "2theta-omega", "2theta/omega") or pos_any is None:
+                kids = {c.tag.split("}")[-1]: c.text for c in el}
+                if ax.startswith("2theta") or pos_any is None:
+                    pos_any = kids
+                if ax.startswith("2theta"):
+                    break
+    if pos_any is not None:
+        if pos_any.get("listPositions"):
+            listed = np.array(_NUM_RE.findall(pos_any["listPositions"]), float)
+        if pos_any.get("startPosition") is not None:
+            start = float(pos_any["startPosition"])
+        if pos_any.get("endPosition") is not None:
+            end = float(pos_any["endPosition"])
+    for el in dp.iter():
+        tag = el.tag.split("}")[-1]
+        if tag == "stepSize" and step is None:
             step = float(el.text)
         elif tag in ("intensities", "counts") and intensities is None:
-            intensities = np.fromstring(el.text, sep=" ")
-    if intensities is None or start is None or end is None:
+            intensities = np.array(_NUM_RE.findall(el.text or ""), float)
+    if intensities is None or (listed is None and (start is None or end is None)):
         raise ValueError(f"could not parse .xrdml: {p}")
+    if listed is not None and listed.size == intensities.size:
+        return listed, intensities
     if step is None:
         step = (end - start) / max(len(intensities) - 1, 1)
     return start + step * np.arange(len(intensities)), intensities
@@ -322,7 +343,7 @@ def load_measured(path, name=None, color="#000000", delimiter=None,
         return m
     if head[:4] == b"PK\x03\x04":                       # ZIP → Bruker .brml
         two_theta, y = _read_brml(p)
-    elif head.lstrip()[:1] in (b"<",):                   # XML (xrdml etc.)
+    elif head.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] == b"<":  # XML (xrdml…), BOM ok
         try:
             two_theta, y = _read_xrdml(p)
         except Exception:
@@ -341,7 +362,7 @@ def load_measured(path, name=None, color="#000000", delimiter=None,
     info = {"path": str(p), "sha256": _sha256(p), "n_points": len(two_theta),
             "warnings": warns,
             "tt_range": (float(two_theta.min()), float(two_theta.max()))}
-    if head[:4] == b"PK\x03\x04" or head.lstrip()[:1] == b"<":
+    if head[:4] == b"PK\x03\x04" or head.lstrip(b"\xef\xbb\xbf \t\r\n")[:1] == b"<":
         wl = _file_wavelength(p)
         if wl is not None:
             info["wavelength"] = wl

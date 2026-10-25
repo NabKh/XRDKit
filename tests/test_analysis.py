@@ -145,3 +145,42 @@ def test_find_peaks_table_on_pt():
     tt111 = 2 * np.degrees(np.arcsin(L1 / (2 * 3.9242 / np.sqrt(3))))
     assert np.min(abs(pk["two_theta"].to_numpy() - tt111)) < 0.01
     assert np.all(np.isfinite(pk["fwhm"]))
+
+
+ANATASE = Structure.from_spacegroup("I4_1/amd", Lattice.tetragonal(3.785, 9.514),
+                                    ["Ti", "O"], [[0, 0, 0], [0, 0, .2081]])
+TI = Structure.from_spacegroup("P6_3/mmc", Lattice.hexagonal(2.9508, 4.6855),
+                               ["Ti"], [[1 / 3, 2 / 3, .25]])
+
+
+def _mixture(parts, seed=0):
+    rng = np.random.default_rng(seed)
+    y = 200.0 + 30.0 * np.exp(-(X - 20.0) / 30.0)
+    for st, amp in parts:
+        for wl, w in ((L1, 1.0), (L2, 0.5)):
+            pat = XRDCalculator(wavelength=wl).get_pattern(st, two_theta_range=(15, 95))
+            for tt, inten in zip(pat.x, pat.y):
+                y = y + w * amp * inten / 100 * pseudo_voigt_area(X, tt, 0.12, 0.5)
+    return Measured("mixture", X, rng.poisson(y).astype(float))
+
+
+def test_identify_phases_finds_both_phases_and_rejects_decoys():
+    m = _mixture([(PT, 2e4), (RUTILE, 6e3)])
+    cands = [{"id": n, "structure": s} for n, s in
+             [("Pt", PT), ("rutile", RUTILE), ("anatase", ANATASE), ("STO", STO),
+              ("Ti", TI)]]
+    res = xa.identify_phases(m, candidates=cands, wavelength=(L1, L2, 0.5))
+    assert sorted(res.phases["database id"]) == ["Pt", "rutile"]
+    pt = res.phases.set_index("database id").loc["Pt"]
+    ru = res.phases.set_index("database id").loc["rutile"]
+    assert abs(pt["a (Å)"] - 3.9242) < 1e-3
+    assert abs(ru["a (Å)"] - 4.5937) < 1e-3 and abs(ru["c (Å)"] - 2.9587) < 1e-3
+    assert res.fit.gof < 1.3
+    assert len(res.unexplained) <= 1   # at most one sub-1 % kinematic line
+
+
+def test_identify_phases_on_noise_finds_nothing():
+    m = Measured("noise", X, np.random.default_rng(2).poisson(
+        np.full_like(X, 300.0)).astype(float))
+    res = xa.identify_phases(m, candidates=[{"id": "Pt", "structure": PT}])
+    assert res.phases.empty and res.fit is None
