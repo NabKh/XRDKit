@@ -184,3 +184,12 @@ def test_identify_phases_on_noise_finds_nothing():
         np.full_like(X, 300.0)).astype(float))
     res = xa.identify_phases(m, candidates=[{"id": "Pt", "structure": PT}])
     assert res.phases.empty and res.fit is None
+
+
+def test_identify_phases_refuses_incomplete_database_search(monkeypatch):
+    def fail(*a, **k):
+        raise ConnectionError("simulated outage")
+    monkeypatch.setattr(xa, "cod_optimade_query",
+                        lambda sub, nelements=None: [] if sub != ("Ti",) else fail())
+    res = xa.identify_phases(_pattern(PT), ["Pt", "Ti"], source="cod")
+    assert not res.complete and res.phases.empty and res.summary.startswith("NO RESULT")

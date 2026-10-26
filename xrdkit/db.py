@@ -246,15 +246,18 @@ def search_cod(formula, max_results=25):
 
 def from_cod_id(cod_id, color="#444444", name=None, cache_dir=None) -> Phase:
     """Fetch a COD CIF by ID (cached locally) and wrap as a Phase."""
-    import requests
+    from xrdkit.core import http_get
     cache = Path(cache_dir) if cache_dir else (Path.home() / ".cache" / "xrdkit" / "cod")
     cache.mkdir(parents=True, exist_ok=True)
     target = cache / f"{cod_id}.cif"
     if not target.exists():
         url = f"https://www.crystallography.net/cod/{cod_id}.cif"
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        target.write_text(r.text)
+        text = http_get(url, timeout=30).text
+        if "_cell_length_a" not in text:   # an error page, not a CIF: do not cache
+            raise ValueError(f"COD {cod_id}: the server did not return a CIF")
+        tmp = target.with_suffix(".part")
+        tmp.write_text(text)
+        tmp.replace(target)
     return from_structure_file(
         target, name=name or f"COD {cod_id}", color=color,
         source_label=f"COD {cod_id}",

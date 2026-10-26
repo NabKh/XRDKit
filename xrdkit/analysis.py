@@ -1496,12 +1496,12 @@ _OPTIMADE_COD = "https://www.crystallography.net/cod/optimade/v1/structures"
 
 
 def cod_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
-                       max_pages: int = 5, timeout: float = 60.0) -> List[Dict]:
+                       max_pages: int = 50, timeout: float = 60.0) -> List[Dict]:
     """Query COD over OPTIMADE for entries containing all ``elements``.
 
     Returns dicts with cod_id, formula (reduced), raw formula, spacegroup,
     title, R and the cell (a, b, c, α, β, γ) when COD lists it."""
-    import requests
+    from xrdkit.core import http_get
     from pymatgen.core import Composition
     els = ",".join(f'"{e}"' for e in elements)
     flt = f"elements HAS ALL {els}"
@@ -1513,8 +1513,7 @@ def cod_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
                                   "_cod_c,_cod_alpha,_cod_beta,_cod_gamma")}
     url, out = _OPTIMADE_COD, []
     for _ in range(max_pages):
-        r = requests.get(url, params=params, timeout=timeout)
-        r.raise_for_status()
+        r = http_get(url, params=params, timeout=timeout)
         j = r.json()
         for d in j.get("data", []):
             a = d.get("attributes", {})
@@ -1539,6 +1538,10 @@ def cod_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
             break
         url = nxt["href"] if isinstance(nxt, dict) else nxt
         params = None
+    else:
+        # more entries than max_pages × 100: a silently truncated list would
+        # drop candidates at random, so fail instead
+        raise RuntimeError(f"more than {max_pages * 100} entries; list truncated")
     return out
 
 
@@ -1563,7 +1566,7 @@ _OPTIMADE_MP = "https://optimade.materialsproject.org/v1/structures"
 
 
 def mp_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
-                      max_ehull: float = 0.1, max_pages: int = 5,
+                      max_ehull: float = 0.1, max_pages: int = 50,
                       timeout: float = 60.0) -> List[Dict]:
     """Materials Project structures over OPTIMADE (no API key needed).
 
@@ -1571,7 +1574,7 @@ def mp_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
     a pymatgen ``structure``. These are DFT (GGA/GGA+U) relaxed cells, which
     are typically 1–2 % larger than experiment, so match with a lattice-scale
     scan (``max_strain`` in :func:`match_cod`)."""
-    import requests
+    from xrdkit.core import http_get
     from pymatgen.core import Lattice, Structure
     els = ",".join(f'"{e}"' for e in elements)
     flt = f"elements HAS ALL {els}"
@@ -1583,8 +1586,7 @@ def mp_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
                                   "_mp_stability")}
     url, out = _OPTIMADE_MP, []
     for _ in range(max_pages):
-        r = requests.get(url, params=params, timeout=timeout)
-        r.raise_for_status()
+        r = http_get(url, params=params, timeout=timeout)
         j = r.json()
         for d in j.get("data", []):
             a = d.get("attributes", {})
@@ -1610,6 +1612,10 @@ def mp_optimade_query(elements: Sequence[str], nelements: Optional[int] = None,
             break
         url = nxt["href"] if isinstance(nxt, dict) else nxt
         params = None
+    else:
+        # more entries than max_pages × 100: a silently truncated list would
+        # drop candidates at random, so fail instead
+        raise RuntimeError(f"more than {max_pages * 100} entries; list truncated")
     return out
 
 
@@ -1690,8 +1696,10 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
                          progress=None):
     """Database phases built from subsets of ``elements`` with kinematic lines.
 
-    Returns (rows, errors, source used); each row has id, formula, spacegroup,
-    title, peaks [(2θ, I, hkl)] and the pymatgen ``structure``. COD entries
+    Returns (rows, errors, source used, failed); each row has id, formula,
+    spacegroup, title, peaks [(2θ, I, hkl)] and the pymatgen ``structure``;
+    ``failed`` lists the queries and downloads that failed after retries, i.e.
+    the candidate list is incomplete when it is not empty. COD entries
     are prefiltered on their allowed reflection positions (cell + space group)
     before their CIFs are downloaded: the ``prefilter_keep`` best by explained
     target intensity, plus the ``prefilter_keep`` best by the fraction of
@@ -1703,6 +1711,7 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
     subsets = [s for k in range(1, min(max_subset, len(elements)) + 1)
                for s in combinations(elements, k)]
     errors: List[str] = []
+    failed: List[str] = []
 
     def run(fn):
         def q(sub):
@@ -1723,6 +1732,7 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
             used = "mp"
         else:
             used = "cod"
+            failed += [f"COD query {e}" for e in errs]
             # one entry (lowest R) per formula, space group and cell: entries
             # of one compound measured at high pressure / temperature or of a
             # different composition within the formula's rounding have other
@@ -1806,13 +1816,21 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
                             "spacegroup": e["spacegroup"], "title": e["title"],
                             "peaks": pk, "structure": ph.info.get("structure")}
                 except Exception as err:
-                    errors.append(f"COD {e['cod_id']} CIF: {type(err).__name__}: {err}"[:200])
+                    import requests
+                    msg = f"COD {e['cod_id']} CIF: {type(err).__name__}: {err}"[:200]
+                    errors.append(msg)
+                    # a download that failed may succeed next time; a CIF that
+                    # cannot be parsed fails the same way on every run
+                    if isinstance(err, requests.RequestException) or \
+                            "did not return a CIF" in str(err):
+                        failed.append(msg)
                     return None
             with ThreadPoolExecutor(max_workers=6) as ex:
                 rows = [r for r in ex.map(full, short) if r]
     if used == "mp":
         hits, errs = run(mp_optimade_query)
         errors += [f"MP {e}" for e in errs]
+        failed += [f"MP query {e}" for e in errs]
         if progress:
             progress(f"Materials Project: {len(hits)} structures within 0.1 eV/atom of hull")
         for e in hits:
@@ -1826,7 +1844,7 @@ def _database_candidates(target_tt, target_h, observed_tt, elements, wl1, tt_ran
                          "title": f"E_hull {e['e_above_hull']:.3f} eV/atom"
                          if e["e_above_hull"] is not None else "",
                          "peaks": pk, "structure": e["structure"]})
-    return rows, errors, used
+    return rows, errors, used, failed
 
 
 def _kinematic_lines(structure, wl1, tt_range):
@@ -1884,7 +1902,7 @@ def match_cod(target_peaks, all_peaks, elements: Sequence[str],
     target_h = target_peaks["height"].to_numpy(float)
     observed_tt = all_peaks["two_theta"].to_numpy(float)
     elements = [e.strip() for e in elements if e.strip()]
-    rows, errors, used = _database_candidates(
+    rows, errors, used, failed = _database_candidates(
         target_tt, target_h, observed_tt, elements, wl1, tt_range, tol,
         max_subset, prefilter_keep, max_strain, source, progress)
 
@@ -1923,6 +1941,7 @@ class PhaseIdentification:
     source: str
     structures: Dict[str, object] = field(default_factory=dict)
     fixed_fit: Optional[Dict] = None   # fixed-structure fit (profiles, scales, cells)
+    complete: bool = True       # False: database search incomplete, nothing reported
 
 
 def _bic_at(r: PawleyResult, n_eff: float) -> float:
@@ -2348,12 +2367,25 @@ def identify_phases(m: Measured, elements: Sequence[str] = (),
     elements = [e.strip() for e in elements if str(e).strip()]
     rows: List[Dict] = []
     errors: List[str] = []
+    failed: List[str] = []
     used = "given"
     if elements:
         say("searching the database …")
-        rows, errors, used = _database_candidates(
+        rows, errors, used, failed = _database_candidates(
             obs_tt, obs_h, obs_tt, elements, wl1, tr, tol, len(elements),
             prefilter_keep, 0.03 if max_strain is None else max_strain, source, say)
+    if failed:
+        # a candidate that failed to download may be the true phase: never
+        # report an identification made from an incomplete candidate list
+        return PhaseIdentification(
+            phases=pd.DataFrame(), fit=None, peaks=peaks, unexplained=peaks, steps=[],
+            summary=(f"NO RESULT: the database search was incomplete ({len(failed)} "
+                     f"{'query or download' if len(failed) == 1 else 'queries or downloads'}"
+                     f" failed after retries, e.g. {failed[0]}). An identification "
+                     "from an incomplete candidate list can be wrong, so none is "
+                     "reported. Run it again; structures already downloaded are "
+                     "cached, so a rerun continues where this one stopped."),
+            caveats=[], errors=errors, source=used, complete=False)
     if max_strain is None:
         max_strain = 0.03
     for c in candidates or ():

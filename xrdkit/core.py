@@ -165,3 +165,27 @@ NATURE_RC = {
     "pdf.fonttype": 42, "ps.fonttype": 42,
     "savefig.dpi": 600, "savefig.bbox": "tight",
 }
+
+
+def http_get(url, params=None, timeout=60.0, tries=5):
+    """GET with retries (connection errors, timeouts, HTTP 429 / 5xx), backing
+    off 2, 4, 8, … s. Raises the last error when every attempt fails."""
+    import time
+
+    import requests
+    err = None
+    for k in range(tries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500 \
+                    and e.response.status_code != 429:
+                raise
+            err = e
+        except requests.RequestException as e:
+            err = e
+        if k < tries - 1:
+            time.sleep(2.0 * 2 ** k)
+    raise err

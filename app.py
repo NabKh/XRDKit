@@ -647,7 +647,8 @@ elif an_by:
             msg.empty()
         pid = st.session_state.phase_id.get(id_key)
         if pid is not None:
-            (st.success if len(pid.phases) and not len(pid.unexplained)
+            (st.error if not pid.complete
+             else st.success if len(pid.phases) and not len(pid.unexplained)
              else st.info if len(pid.phases) else st.warning)(pid.summary)
             if len(pid.phases):
                 show = pid.phases.copy()
