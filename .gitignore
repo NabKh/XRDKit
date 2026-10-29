@@ -35,7 +35,6 @@ htmlcov/
 # IDE / editor / local agent config
 .vscode/
 .idea/
-.claude/
 *.swp
 .DS_Store
 
